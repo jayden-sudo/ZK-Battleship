@@ -1,0 +1,5 @@
+cruiser = ["0", "6", "12"]
+destroyer = ["14", "15"]
+submarine = "21"
+expected_hash = "0x04df209ed0aad0968c3aa95d735485f04ed83fb29173287fda6716461da5815d"
+salt = "7"

@@ -1,0 +1,20 @@
+{
+    "name": "zk_battleship",
+    "version": "0.0.1",
+    "scripts": {
+        "build:circuit": "nargo check && nargo compile --force && nargo execute",
+        "test:circuit": "nargo test",
+        "build:contract": "forge build --sizes",
+        "test:contract": "forge test --gas-report",
+        "write_vk":"bb write_vk --scheme ultra_honk  --oracle_hash keccak -b ./target/process_shot.json -o ./target",
+        "generate_zk_verify_contract": "bb write_solidity_verifier --scheme ultra_honk --optimized -k ./target/vk -o ./contract/src/Verifier.sol",
+        "test_prove": "ts-node ./js/prove.ts"
+    },
+    "devDependencies": {
+        "@types/node": "^25.0.3",
+        "@types/shelljs": "^0.10.0",
+        "shelljs": "^0.10.0",
+        "ts-node": "^10.9.2",
+        "typescript": "^5.9.3"
+    }
+}

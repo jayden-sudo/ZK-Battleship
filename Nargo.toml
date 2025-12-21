@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "circuit/bin/init_board",
+    "circuit/bin/process_shot",
+
+    "circuit/lib"
+]

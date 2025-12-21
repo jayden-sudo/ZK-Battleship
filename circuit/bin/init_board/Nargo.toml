@@ -1,0 +1,7 @@
+[package]
+name = "init_board"
+type = "bin"
+compiler_version = ">=1.0.0"
+
+[dependencies]
+board_lib = { path = "../../lib" }

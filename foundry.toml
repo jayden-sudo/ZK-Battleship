@@ -1,6 +1,12 @@
 [profile.default]
-src = "src"
-out = "out"
+src = "contract/src"
+test = 'contract/test'
+script = "contract/script"
+out = "contract/out"
 libs = ["lib"]
-
-# See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
+solc = "0.8.30"
+optimizer = true
+optimizer_runs = 160
+via_ir = false
+bytecode_hash = "none"
+cbor_metadata = false
