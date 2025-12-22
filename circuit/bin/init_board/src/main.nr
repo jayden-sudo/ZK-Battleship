@@ -1,9 +1,9 @@
 use board_lib::init_board;
 
 fn main(
-    cruiser: [Field; 3],
-    destroyer: [Field; 2],
-    submarine: Field,
+    cruiser: [u8; 3],
+    destroyer: [u8; 2],
+    submarine: u8,
     salt: Field,
     expected_hash: pub Field,
 ) {

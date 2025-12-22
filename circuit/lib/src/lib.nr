@@ -1,62 +1,63 @@
 use poseidon::poseidon2::Poseidon2;
 
-pub fn init_board(
-    cruiser: [Field; 3],
-    destroyer: [Field; 2],
-    submarine: Field,
-    salt: Field,
-) -> Field {
-    let params: [Field; 7] =
-        [cruiser[0], cruiser[1], cruiser[2], destroyer[0], destroyer[1], submarine, salt];
-
+pub fn init_board(cruiser: [u8; 3], destroyer: [u8; 2], submarine: u8, salt: Field) -> Field {
     // Validate ship position
-    let max_value: Field = 36; // 6x6 grid, positions 0..35
+    let max_value: u8 = 36; // 6x6 grid, positions 0..35
     for i in 0..cruiser.len() {
-        assert(cruiser[i].lt(max_value));
+        assert(cruiser[i] < max_value);
         if i > 0 {
-            assert(cruiser[i - 1].lt(cruiser[i]));
-            let s: Field = cruiser[i] - cruiser[i - 1];
+            assert(cruiser[i - 1] < cruiser[i]);
+            let s = cruiser[i] - cruiser[i - 1];
             if s != 1 {
                 assert(s == 6);
             }
         }
     }
     for i in 0..destroyer.len() {
-        assert(destroyer[i].lt(max_value));
+        assert(destroyer[i] < max_value);
         if i > 0 {
-            assert(destroyer[i - 1].lt(destroyer[i]));
-            let s: Field = destroyer[i] - destroyer[i - 1];
+            assert(destroyer[i - 1] < destroyer[i]);
+            let s = destroyer[i] - destroyer[i - 1];
             if s != 1 {
                 assert(s == 6);
             }
         }
     }
-    assert(submarine.lt(max_value));
+    assert(submarine < max_value);
+
+    let params: [Field; 7] = [
+        cruiser[0] as Field,
+        cruiser[1] as Field,
+        cruiser[2] as Field,
+        destroyer[0] as Field,
+        destroyer[1] as Field,
+        submarine as Field,
+        salt,
+    ];
 
     let mut grid: [bool; 36] = [false; 36];
     for i in 0..(params.len() - 1) {
-        assert(grid[i] == false);
-        grid[i] = true;
+        let pos = params[i] as u32;
+        assert(grid[pos] == false);
+        grid[pos] = true;
     }
 
     // Compute Poseidon hash
     Poseidon2::hash(params, params.len())
 }
 
-// pub global STATUS_ERROR: Field = 0; // error
-pub global STATUS_MISS: Field = 1; // miss
-pub global STATUS_HIT: Field = 2; // hit
-pub global STATUS_SUNK: Field = 3; // sunk
+pub global STATUS_MISS: u8 = 0; // miss
+pub global STATUS_HIT: u8 = 1; // hit
+pub global STATUS_SUNK: u8 = 2; // sunk
 
 pub fn process_shot(
-    cruiser: [Field; 3],
-    destroyer: [Field; 2],
-    submarine: Field,
-    grid_snapshot: Field,
-    shot_position: Field,
-) -> Field {
-    assert(shot_position.lt(36));
-    let grid_snapshot_bits: [u1; 36] = grid_snapshot.to_le_bits();
+    cruiser: [u8; 3],
+    destroyer: [u8; 2],
+    submarine: u8,
+    grid_snapshot_bits: [u1; 36],
+    shot_position: u8,
+) -> u8 {
+    assert(shot_position < 36);
     assert(grid_snapshot_bits[shot_position as u32] == 0);
 
     let mut status = STATUS_MISS;

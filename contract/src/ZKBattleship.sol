@@ -276,11 +276,13 @@ contract ZKBattleship is IZKBattleship {
         ShotResult shotResult,
         bytes calldata proof
     ) internal returns (bool) {
-        bytes32[] memory publicInputs = new bytes32[](4);
+        bytes32[] memory publicInputs = new bytes32[](2);
         publicInputs[0] = boardCommitment;
-        publicInputs[1] = bytes32(uint256(gameBoard));
-        publicInputs[2] = bytes32(uint256(firePosition));
-        publicInputs[3] = bytes32(uint256(shotResult));
+        publicInputs[1] = bytes32(
+            (uint256(gameBoard) << 12) +
+                (uint256(firePosition) << 4) +
+                uint256(shotResult)
+        );
         return VERIFIER.verify(proof, publicInputs);
     }
 
@@ -354,7 +356,7 @@ contract ZKBattleship is IZKBattleship {
                 }
                 game.nextTurnState = NextTurnState.Completed;
             } else {
-                gameBoard |= uint64(1) << game.fireAtPosition;
+                gameBoard |= uint64(1) << ((6 * 6) - 1 - game.fireAtPosition);
                 if (game.nextTurnState == NextTurnState.JoinerFire) {
                     game.joinerGameBoard = gameBoard;
                 } else {
