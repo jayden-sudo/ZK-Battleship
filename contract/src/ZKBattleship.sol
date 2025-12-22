@@ -1,36 +1,74 @@
 // SPDX-License-Identifier: GPL-3.0
 pragma solidity ^0.8.30;
 
-import {IZKBattleship, UserBalance, Game, NextTurnState} from "./IZKBattleship.sol";
+import {IZKBattleship, UserBalance, Game, NextTurnState, ShotResult} from "./IZKBattleship.sol";
 import {GameLinkedList} from "./GameLinkedList.sol";
 import {IVerifier} from "./Verifier.sol";
 
+/**
+ * @title ZKBattleship
+ * @notice This contract is the main implementation of the ZK-Battleship game.
+ * @dev It handles game logic, player funds, state transitions, and verification of ZK proofs.
+ *      It relies on a Verifier contract to validate proofs for game actions.
+ */
 contract ZKBattleship is IZKBattleship {
     using GameLinkedList for mapping(uint256 => uint256);
 
+    // =================================================================================================
+    // State Variables
+    // =================================================================================================
+
+    /// @notice The grace period (in seconds) for on-chain transaction confirmation.
     uint8 public immutable SAFE_ONCHAIN_TIME;
+    /// @notice The time (in seconds) allocated for a player to make a decision.
     uint8 public immutable PLAYER_DECISION_TIME;
+    /// @notice The time (in seconds) allocated for generating a ZK proof.
     uint8 public immutable ZK_PROOF_TIME;
+    /// @notice The contract that verifies ZK proofs.
     IVerifier public immutable VERIFIER;
 
+    /// @notice The counter for generating unique game IDs.
     uint256 private nextGameId = 10;
 
+    /// @notice Maps user addresses to their fund balances.
     mapping(address => UserBalance) private balances;
+    /// @notice Maps game IDs to their full game data.
     mapping(uint256 => Game) private games;
+    /// @notice A linked list of games waiting for a joiner, allowing for efficient pagination.
     mapping(uint256 => uint256) private waitingGames;
+    /// @notice Maps user addresses to the ID of the game they are currently in.
+    mapping(address => uint256) private userGameIds;
 
+    // =================================================================================================
+    // Constructor
+    // =================================================================================================
+
+    /**
+     * @notice Initializes the ZKBattleship contract with necessary parameters.
+     * @param verifier The address of the `Verifier` contract for ZK proofs.
+     * @param safeOnchainTime The grace period (seconds) for transaction confirmation.
+     * @param playerDecisionTime The time (seconds) for a player to decide their move.
+     * @param zkProofTime The time (seconds) allocated for ZK proof generation.
+     */
     constructor(
         IVerifier verifier,
-        uint8 safe_onchain_time,
-        uint8 player_decision_time,
-        uint8 zk_proof_time
+        uint8 safeOnchainTime,
+        uint8 playerDecisionTime,
+        uint8 zkProofTime
     ) {
         VERIFIER = verifier;
-        SAFE_ONCHAIN_TIME = safe_onchain_time;
-        PLAYER_DECISION_TIME = player_decision_time;
-        ZK_PROOF_TIME = zk_proof_time;
+        SAFE_ONCHAIN_TIME = safeOnchainTime;
+        PLAYER_DECISION_TIME = playerDecisionTime;
+        ZK_PROOF_TIME = zkProofTime;
     }
 
+    // =================================================================================================
+    // View Functions
+    // =================================================================================================
+
+    /**
+     * @inheritdoc IZKBattleship
+     */
     function listWaitingGames(
         uint256 from,
         uint256 limit
@@ -38,48 +76,59 @@ contract ZKBattleship is IZKBattleship {
         return waitingGames.list(from, limit);
     }
 
+    /**
+     * @inheritdoc IZKBattleship
+     */
+    function getUserGameId(
+        address user
+    ) external view override returns (uint256 gameId) {
+        return userGameIds[user];
+    }
+
+    /**
+     * @inheritdoc IZKBattleship
+     */
     function getGameData(
         uint256 gameId
     ) external view override returns (Game memory) {
         return games[gameId];
     }
 
-    function _getNextGameId() internal returns (uint256) {
-        return nextGameId++;
+    /**
+     * @inheritdoc IZKBattleship
+     */
+    function getUserBalance(
+        address user
+    ) external view override returns (UserBalance memory) {
+        return balances[user];
     }
 
-    function _getCurrentGameId() internal view returns (uint256) {
-        return nextGameId;
-    }
+    // =================================================================================================
+    // State-Changing Functions
+    // =================================================================================================
 
-    function _deposit(uint256 amount, address user) internal {
-        balances[user].totalBalance += amount;
-    }
-
+    /**
+     * @notice Fallback function to receive ETH and credit the sender's balance.
+     */
     receive() external payable {
         _deposit(msg.value, msg.sender);
     }
 
     /**
-     * @notice Deposit ETH into the caller's account held by the contract.
-     * @dev The caller should send ETH with the transaction (msg.value).
+     * @inheritdoc IZKBattleship
      */
     function deposit() external payable override {
         _deposit(msg.value, msg.sender);
     }
 
     /**
-     * @notice Withdraw unlocked ETH from the caller's account and transfer it to `recipient`.
-     * @dev Implementations must ensure that only available (unlocked) funds can be withdrawn
-     *      and should protect against reentrancy and other common risks.
-     * @param amount The amount of ETH (in wei) to withdraw.
-     * @param recipient The address that will receive the withdrawn ETH.
+     * @inheritdoc IZKBattleship
      */
     function withdraw(uint256 amount, address recipient) external override {
         UserBalance storage userBalance = balances[msg.sender];
         require(
             userBalance.totalBalance - userBalance.lockedBalance >= amount,
-            "Insufficient unlocked balance"
+            "ZKBattleship: Insufficient unlocked balance"
         );
 
         userBalance.totalBalance -= amount;
@@ -89,27 +138,11 @@ contract ZKBattleship is IZKBattleship {
         }
 
         (bool success, ) = recipient.call{value: amount}("");
-        require(success, "ETH transfer failed");
+        require(success, "ZKBattleship: ETH transfer failed");
     }
 
     /**
-     * @notice Retrieve balance information for `user`.
-     * @param user The address whose balance is being queried.
-     * @return UserBalance A struct containing `totalBalance` and `lockedBalance` for the user.
-     */
-    function getUserBalance(
-        address user
-    ) external view override returns (UserBalance memory) {
-        return balances[user];
-    }
-
-    /**
-     * @notice Create a new game by committing necessary secrets and posting a stake.
-     * @dev `randomnessCommitment` and `boardCommitment` are commitments (hashes) that will
-     *      later be revealed and verified. `stake` is locked until the game concludes.
-     * @param randomnessCommitment Commitment to per-game randomness provided by the creator.
-     * @param boardCommitment Commitment to the creator's board layout (e.g., Merkle root or hash).
-     * @param stake Amount of ETH (in wei) to lock as the creator's stake for the game.
+     * @inheritdoc IZKBattleship
      */
     function createGame(
         bytes32 randomnessCommitment,
@@ -123,11 +156,16 @@ contract ZKBattleship is IZKBattleship {
             balances[msg.sender].totalBalance -
                 balances[msg.sender].lockedBalance >=
                 stake,
-            "Insufficient unlocked balance for stake"
+            "ZKBattleship: Insufficient unlocked balance for stake"
         );
         balances[msg.sender].lockedBalance += stake;
 
+        require(
+            userGameIds[msg.sender] == 0,
+            "ZKBattleship: User is already in a game"
+        );
         uint256 gameId = _getNextGameId();
+        userGameIds[msg.sender] = gameId;
 
         Game memory newGame = Game({
             creator: msg.sender,
@@ -151,11 +189,7 @@ contract ZKBattleship is IZKBattleship {
     }
 
     /**
-     * @notice Join an existing game by providing commitments for randomness and board layout.
-     * @dev The joiner must satisfy any stake or match conditions required by the game creator.
-     * @param gameId The identifier of the game to join.
-     * @param randomnessSalt per-game randomness.
-     * @param boardCommitment Commitment to the joiner's board layout.
+     * @inheritdoc IZKBattleship
      */
     function joinGame(
         uint256 gameId,
@@ -166,16 +200,22 @@ contract ZKBattleship is IZKBattleship {
             _deposit(msg.value, msg.sender);
         }
 
+        require(
+            userGameIds[msg.sender] == 0,
+            "ZKBattleship: User is already in a game"
+        );
+        userGameIds[msg.sender] = gameId;
+
         Game storage game = games[gameId];
         require(
             game.nextTurnState == NextTurnState.Join,
-            "Game is not available to join"
+            "ZKBattleship: Game is not available to join"
         );
         require(
             balances[msg.sender].totalBalance -
                 balances[msg.sender].lockedBalance >=
                 game.stake,
-            "Insufficient unlocked balance for stake"
+            "ZKBattleship: Insufficient unlocked balance for stake"
         );
         balances[msg.sender].lockedBalance += game.stake;
         waitingGames.remove(gameId);
@@ -190,11 +230,7 @@ contract ZKBattleship is IZKBattleship {
     }
 
     /**
-     * @notice Reveal the preimage (salt) for a previously submitted randomness commitment.
-     * @dev Revealing the randomness allows the contract and the opponent to verify the
-     *      original commitment and resolve any randomness-dependent game mechanics.
-     * @param gameId The identifier of the game for which randomness is revealed.
-     * @param randomnessSalt The secret salt whose hash was previously committed.
+     * @inheritdoc IZKBattleship
      */
     function revealRandomness(
         uint256 gameId,
@@ -203,27 +239,26 @@ contract ZKBattleship is IZKBattleship {
         Game storage game = games[gameId];
         require(
             game.nextTurnState == NextTurnState.RevealRandomness,
-            "Game state invalid"
+            "ZKBattleship: Not in RevealRandomness state"
         );
         require(
             msg.sender == game.creator,
-            "Only the creator can reveal randomness"
+            "ZKBattleship: Only the creator can reveal randomness"
         );
         require(
             game.creatorRandomnessCommitment ==
                 keccak256(abi.encode(randomnessSalt)),
-            "Invalid randomness salt"
+            "ZKBattleship: Invalid randomness salt"
         );
+        // Determine initiative by combining both players' randomness.
         bytes32 combinedRandomness = keccak256(
             abi.encode(randomnessSalt, game.joinerRandomnessSalt)
         );
         bool creatorFirst = uint256(combinedRandomness) % 2 == 1;
-        if (creatorFirst) {
-            // the creator goes first
-            game.nextTurnState = NextTurnState.CreatorFire;
-        } else {
-            game.nextTurnState = NextTurnState.JoinerFire;
-        }
+
+        game.nextTurnState = creatorFirst
+            ? NextTurnState.CreatorFire
+            : NextTurnState.JoinerFire;
         game.lastActiveTimestamp = uint64(block.timestamp);
 
         emit RandomnessRevealed(
@@ -233,43 +268,275 @@ contract ZKBattleship is IZKBattleship {
     }
 
     /**
-     * @notice Fire a shot at the specified position in `gameId`.
-     * @dev `firePosition` encodes the target cell; the current game state must permit the
-     *      caller to act. This call typically emits `ShotFired` and advances the turn.
-     * @param gameId The identifier of the game where the shot is fired.
-     * @param firePosition The encoded board cell index being targeted.
+     * @inheritdoc IZKBattleship
      */
     function shoot(uint256 gameId, uint8 firePosition) external override {
-        require(firePosition < 6 * 6, "Invalid fire position");
+        require(firePosition < 36, "ZKBattleship: Invalid fire position");
         Game storage game = games[gameId];
         uint64 gameBoard;
+
         if (game.nextTurnState == NextTurnState.JoinerFire) {
             require(
                 msg.sender == game.joiner,
-                "It's the joiner's turn to shoot"
+                "ZKBattleship: Not joiner's turn to shoot"
             );
             gameBoard = game.creatorGameBoard;
             game.nextTurnState = NextTurnState.CreatorReport;
         } else if (game.nextTurnState == NextTurnState.CreatorFire) {
             require(
                 msg.sender == game.creator,
-                "It's the creator's turn to shoot"
+                "ZKBattleship: Not creator's turn to shoot"
             );
             gameBoard = game.joinerGameBoard;
             game.nextTurnState = NextTurnState.JoinerReport;
         } else {
-            revert("Game state invalid");
+            revert("ZKBattleship: Not in a valid state to shoot");
         }
-        game.lastActiveTimestamp = uint64(block.timestamp);
+
         require(
             (gameBoard >> firePosition) & 1 == 0,
-            "Position already shot at"
+            "ZKBattleship: Position already shot at"
         );
+        game.lastActiveTimestamp = uint64(block.timestamp);
         game.fireAtPosition = firePosition;
         emit ShotFired(gameId, msg.sender, firePosition);
     }
 
-    function zkProofVerify(
+    /**
+     * @inheritdoc IZKBattleship
+     */
+    function reportShotResult(
+        uint256 gameId,
+        ShotResult shotResult,
+        bytes calldata proof
+    ) external override {
+        Game storage game = games[gameId];
+        bytes32 boardCommitment;
+        uint64 gameBoard;
+
+        // Determine whose turn it is to report and set next state
+        if (game.nextTurnState == NextTurnState.JoinerReport) {
+            require(
+                msg.sender == game.joiner,
+                "ZKBattleship: Not joiner's turn to report"
+            );
+            game.nextTurnState = NextTurnState.JoinerFire; // Attacker's turn to fire again
+            gameBoard = game.joinerGameBoard;
+            boardCommitment = game.joinerBoardCommitment;
+        } else if (game.nextTurnState == NextTurnState.CreatorReport) {
+            require(
+                msg.sender == game.creator,
+                "ZKBattleship: Not creator's turn to report"
+            );
+            game.nextTurnState = NextTurnState.CreatorFire; // Attacker's turn to fire again
+            gameBoard = game.creatorGameBoard;
+            boardCommitment = game.creatorBoardCommitment;
+        } else {
+            revert("ZKBattleship: Not in a valid state to report result");
+        }
+
+        game.lastActiveTimestamp = uint64(block.timestamp);
+
+        // Verify the ZK proof for the reported shot result
+        require(
+            _zkProofVerify(
+                boardCommitment,
+                gameBoard,
+                game.fireAtPosition,
+                shotResult,
+                proof
+            ),
+            "ZKBattleship: Invalid ZK proof for shot result"
+        );
+
+        // If the shot was a hit or sunk a ship, update the game board
+        if (shotResult == ShotResult.Hit || shotResult == ShotResult.Sunk) {
+            uint64 newGameBoard = gameBoard |
+                (uint64(1) << ((36) - 1 - game.fireAtPosition));
+
+            // Check for winner: 6 total hits are required to win.
+            if (_hitedObjectCount(newGameBoard) >= 6) {
+                address winner;
+                address loser;
+                if (game.nextTurnState == NextTurnState.JoinerFire) {
+                    // Joiner was reporting, creator shot
+                    winner = game.creator;
+                    loser = game.joiner;
+                } else {
+                    // Creator was reporting, joiner shot
+                    winner = game.joiner;
+                    loser = game.creator;
+                }
+
+                // Transfer stake from loser to winner
+                balances[winner].lockedBalance -= game.stake;
+                balances[loser].lockedBalance -= game.stake;
+                balances[winner].totalBalance += game.stake;
+                balances[loser].totalBalance -= game.stake;
+
+                _gameEnded(gameId, winner);
+            } else {
+                // Update the defender's board with the new hit
+                if (game.nextTurnState == NextTurnState.JoinerFire) {
+                    // Joiner was reporting
+                    game.joinerGameBoard = newGameBoard;
+                } else {
+                    // Creator was reporting
+                    game.creatorGameBoard = newGameBoard;
+                }
+            }
+        }
+
+        emit ShotResultReported(gameId, msg.sender, shotResult);
+    }
+
+    /**
+     * @inheritdoc IZKBattleship
+     */
+    function leaveGame(uint256 gameId) external override {
+        Game storage game = games[gameId];
+        require(
+            game.nextTurnState > NextTurnState.Blank &&
+                game.nextTurnState < NextTurnState.Completed,
+            "ZKBattleship: Game is already completed"
+        );
+        require(
+            msg.sender == game.creator || msg.sender == game.joiner,
+            "ZKBattleship: Not a player in this game"
+        );
+
+        address opponent;
+
+        if (game.nextTurnState == NextTurnState.Join) {
+            // Game has not started, creator is leaving. Refund stake.
+            require(
+                msg.sender == game.creator,
+                "ZKBattleship: Only creator can leave at this stage"
+            );
+            balances[game.creator].lockedBalance -= game.stake;
+            opponent = address(0); // No winner
+        } else {
+            // Game is in progress, leaver forfeits.
+            opponent = msg.sender == game.creator ? game.joiner : game.creator;
+
+            // Transfer stake to the opponent
+            balances[msg.sender].lockedBalance -= game.stake;
+            balances[opponent].lockedBalance -= game.stake;
+            balances[opponent].totalBalance += game.stake;
+            balances[msg.sender].totalBalance -= game.stake;
+        }
+
+        _gameEnded(gameId, opponent);
+    }
+
+    /**
+     * @inheritdoc IZKBattleship
+     */
+    function terminateGame(uint256 gameId) external override {
+        Game storage game = games[gameId];
+        require(
+            game.nextTurnState > NextTurnState.Join &&
+                game.nextTurnState < NextTurnState.Completed,
+            "ZKBattleship: Game cannot be terminated in its current state"
+        );
+
+        uint64 timeout;
+        bool isJoinerTerminating = false;
+
+        // Determine the appropriate timeout based on the game state.
+        if (game.nextTurnState == NextTurnState.RevealRandomness) {
+            isJoinerTerminating = true;
+            timeout = game.lastActiveTimestamp + SAFE_ONCHAIN_TIME;
+        } else if (game.nextTurnState == NextTurnState.CreatorFire) {
+            isJoinerTerminating = true;
+            timeout =
+                game.lastActiveTimestamp +
+                PLAYER_DECISION_TIME +
+                SAFE_ONCHAIN_TIME;
+        } else if (game.nextTurnState == NextTurnState.JoinerFire) {
+            timeout =
+                game.lastActiveTimestamp +
+                PLAYER_DECISION_TIME +
+                SAFE_ONCHAIN_TIME;
+        } else if (game.nextTurnState == NextTurnState.CreatorReport) {
+            isJoinerTerminating = true;
+            timeout =
+                game.lastActiveTimestamp +
+                ZK_PROOF_TIME +
+                SAFE_ONCHAIN_TIME;
+        } else if (game.nextTurnState == NextTurnState.JoinerReport) {
+            timeout =
+                game.lastActiveTimestamp +
+                ZK_PROOF_TIME +
+                SAFE_ONCHAIN_TIME;
+        } else {
+            revert("ZKBattleship: Invalid game state for termination");
+        }
+
+        address expectedTerminator = isJoinerTerminating
+            ? game.joiner
+            : game.creator;
+        require(
+            msg.sender == expectedTerminator,
+            "ZKBattleship: Not your turn to terminate"
+        );
+        require(
+            block.timestamp > timeout,
+            "ZKBattleship: Timeout period has not passed"
+        );
+
+        // The caller (msg.sender) wins due to opponent's inactivity.
+        address opponent = isJoinerTerminating ? game.creator : game.joiner;
+
+        balances[msg.sender].lockedBalance -= game.stake;
+        balances[opponent].lockedBalance -= game.stake;
+        balances[msg.sender].totalBalance += game.stake;
+        balances[opponent].totalBalance -= game.stake;
+
+        _gameEnded(gameId, msg.sender);
+    }
+
+    /**
+     * @inheritdoc IZKBattleship
+     */
+    function sendMessage(
+        address recipient,
+        string calldata message
+    ) external override {
+        emit ChatMessage(msg.sender, recipient, message);
+    }
+
+    // =================================================================================================
+    // Internal Functions
+    // =================================================================================================
+
+    /**
+     * @notice Increments the game ID counter and returns the new ID.
+     * @return The next available game ID.
+     */
+    function _getNextGameId() internal returns (uint256) {
+        return nextGameId++;
+    }
+
+    /**
+     * @notice Credits a user's total balance with a specified amount.
+     * @param amount The amount of ETH (in wei) to deposit.
+     * @param user The address of the user to credit.
+     */
+    function _deposit(uint256 amount, address user) internal {
+        balances[user].totalBalance += amount;
+    }
+
+    /**
+     * @notice Verifies a ZK proof against public inputs derived from game data.
+     * @param boardCommitment The hash commitment of the defender's board.
+     * @param gameBoard The bitmask representing the defender's board state (hits).
+     * @param firePosition The position that was fired upon.
+     * @param shotResult The reported result of the shot.
+     * @param proof The ZK proof data to be verified.
+     * @return A boolean indicating whether the proof is valid.
+     */
+    function _zkProofVerify(
         bytes32 boardCommitment,
         uint64 gameBoard,
         uint8 firePosition,
@@ -278,6 +545,7 @@ contract ZKBattleship is IZKBattleship {
     ) internal returns (bool) {
         bytes32[] memory publicInputs = new bytes32[](2);
         publicInputs[0] = boardCommitment;
+        // Pack game state data into a single bytes32 public input.
         publicInputs[1] = bytes32(
             (uint256(gameBoard) << 12) +
                 (uint256(firePosition) << 4) +
@@ -286,8 +554,14 @@ contract ZKBattleship is IZKBattleship {
         return VERIFIER.verify(proof, publicInputs);
     }
 
-    function hitedObjectCount(uint64 gameBoard) internal pure returns (uint8) {
-        // https://www.chessprogramming.org/Population_Count
+    /**
+     * @notice Counts the number of set bits (1s) in a uint64.
+     * @dev Implements a parallel bit counting algorithm (popcount).
+     *      See: https://www.chessprogramming.org/Population_Count
+     * @param gameBoard The uint64 value to count bits in.
+     * @return The number of set bits.
+     */
+    function _hitedObjectCount(uint64 gameBoard) internal pure returns (uint8) {
         gameBoard = gameBoard - ((gameBoard >> 1) & 0x5555555555555555);
         gameBoard =
             (gameBoard & 0x3333333333333333) +
@@ -298,190 +572,23 @@ contract ZKBattleship is IZKBattleship {
     }
 
     /**
-     * @notice Report the result of a shot together with a verification proof (e.g., ZK proof).
-     * @dev The `proof` bytes are verified on-chain to ensure the reported result matches the
-     *      defender's committed board without revealing sensitive board details.
-     * @param gameId The identifier of the relevant game.
-     * @param shotResult The reported outcome (Miss/Hit/Sunk).
-     * @param proof Serialized proof data used to validate the correctness of `shotResult`
+     * @notice Cleans up game state after a game has concluded.
+     * @dev Resets game-related mappings for both players and clears the game struct.
+     * @param gameId The ID of the game that has ended.
+     * @param winner The address of the winning player, or address(0) if there is no winner.
      */
-    function reportShotResult(
-        uint256 gameId,
-        ShotResult shotResult,
-        bytes calldata proof
-    ) external override {
+    function _gameEnded(uint256 gameId, address winner) internal {
         Game storage game = games[gameId];
-        uint64 gameBoard;
-        if (game.nextTurnState == NextTurnState.JoinerReport) {
-            require(msg.sender == game.joiner, "It's the joiner's turn");
-            game.nextTurnState = NextTurnState.JoinerFire;
-            gameBoard = game.joinerGameBoard;
-        } else if (game.nextTurnState == NextTurnState.CreatorReport) {
-            require(msg.sender == game.creator, "It's the creator's turn");
-            game.nextTurnState = NextTurnState.CreatorFire;
-            gameBoard = game.creatorGameBoard;
-        } else {
-            revert("Game state invalid");
+        userGameIds[game.creator] = 0;
+        if (game.joiner != address(0)) {
+            userGameIds[game.joiner] = 0;
         }
-        game.lastActiveTimestamp = uint64(block.timestamp);
-        require(
-            zkProofVerify(
-                msg.sender == game.joiner
-                    ? game.joinerBoardCommitment
-                    : game.creatorBoardCommitment,
-                gameBoard,
-                game.fireAtPosition,
-                shotResult,
-                proof
-            ),
-            "Invalid ZK proof for shot result"
-        );
-        // update gameBoard
-        if (shotResult == ShotResult.Hit || shotResult == ShotResult.Sunk) {
-            // check if user wins the game (6 hits needed to win)
-            if (hitedObjectCount(gameBoard) >= 5) {
-                // user wins
-                if (game.nextTurnState == NextTurnState.JoinerFire) {
-                    balances[game.creator].lockedBalance -= game.stake;
-                    balances[game.joiner].lockedBalance -= game.stake;
-                    balances[game.creator].totalBalance += game.stake;
-                    balances[game.joiner].totalBalance -= game.stake;
-                    gameEnded(gameId, game.creator);
-                } else if (game.nextTurnState == NextTurnState.CreatorFire) {
-                    balances[game.joiner].lockedBalance -= game.stake;
-                    balances[game.creator].lockedBalance -= game.stake;
-                    balances[game.joiner].totalBalance += game.stake;
-                    balances[game.creator].totalBalance -= game.stake;
-                    gameEnded(gameId, game.joiner);
-                }
-                game.nextTurnState = NextTurnState.Completed;
-            } else {
-                gameBoard |= uint64(1) << ((6 * 6) - 1 - game.fireAtPosition);
-                if (game.nextTurnState == NextTurnState.JoinerFire) {
-                    game.joinerGameBoard = gameBoard;
-                } else {
-                    game.creatorGameBoard = gameBoard;
-                }
-            }
-        }
-    }
 
-    /**
-     * @notice Quit or forfeit an in-progress or not-yet-started game.
-     * @dev The exact behavior (refunds, penalties, state transitions) is implementation-defined
-     *      and handled by the concrete contract.
-     * @param gameId The identifier of the game to quit.
-     */
-    function quitGame(uint256 gameId) external override {
-        Game storage game = games[gameId];
-        require(
-            game.nextTurnState > NextTurnState.Blank &&
-                game.nextTurnState < NextTurnState.Completed,
-            "Game already completed"
-        );
-        require(
-            msg.sender == game.creator || msg.sender == game.joiner,
-            "Not a player in this game"
-        );
-        /*
-            We assume the game runs on a high-performance chain (with less than 1s from transaction submission to on-chain confirmation), 
-            and that users use wallets supporting “SessionKey”. This means that, apart from proof generation and player decision-making, 
-            no additional time is required—the wallet will directly send transactions at the request of the game frontend.
-            Therefore, the timeout for each phase is defined as follows:
-             • [Safe on-chain time = 3s]
-             • RevealRandomness — safe on-chain time
-             • CreatorFire — player decision time + safe on-chain time
-             • JoinerFire — player decision time + safe on-chain time
-             • CreatorReport — zk proof generation time + safe on-chain time
-             • JoinerReport — zk proof generation time + safe on-chain time
-         */
-
-        if (game.nextTurnState == NextTurnState.Join) {
-            // only creator exists
-            balances[game.creator].lockedBalance -= game.stake;
-            gameEnded(gameId, address(0));
-        } else {
-            if (game.nextTurnState == NextTurnState.RevealRandomness) {
-                require(msg.sender == game.joiner, "Only joiner can quit now");
-                require(
-                    block.timestamp >
-                        game.lastActiveTimestamp + SAFE_ONCHAIN_TIME,
-                    "Cannot quit during RevealRandomness phase yet"
-                );
-            } else if (game.nextTurnState == NextTurnState.CreatorFire) {
-                require(msg.sender == game.joiner, "Only joiner can quit now");
-                require(
-                    block.timestamp >
-                        game.lastActiveTimestamp +
-                            PLAYER_DECISION_TIME +
-                            SAFE_ONCHAIN_TIME,
-                    "Cannot quit during CreatorFire phase yet"
-                );
-            } else if (game.nextTurnState == NextTurnState.JoinerFire) {
-                require(
-                    msg.sender == game.creator,
-                    "Only creator can quit now"
-                );
-                require(
-                    block.timestamp >
-                        game.lastActiveTimestamp +
-                            PLAYER_DECISION_TIME +
-                            SAFE_ONCHAIN_TIME,
-                    "Cannot quit during JoinerFire phase yet"
-                );
-            } else if (game.nextTurnState == NextTurnState.CreatorReport) {
-                require(msg.sender == game.joiner, "Only joiner can quit now");
-                require(
-                    block.timestamp >
-                        game.lastActiveTimestamp +
-                            ZK_PROOF_TIME +
-                            SAFE_ONCHAIN_TIME,
-                    "Cannot quit during CreatorReport phase yet"
-                );
-            } else if (game.nextTurnState == NextTurnState.JoinerReport) {
-                require(
-                    msg.sender == game.creator,
-                    "Only creator can quit now"
-                );
-                require(
-                    block.timestamp >=
-                        game.lastActiveTimestamp +
-                            ZK_PROOF_TIME +
-                            SAFE_ONCHAIN_TIME,
-                    "Cannot quit during JoinerReport phase yet"
-                );
-            } else {
-                revert("Invalid game state for quitting");
-            }
-            balances[game.creator].lockedBalance -= game.stake;
-            balances[game.joiner].lockedBalance -= game.stake;
-            balances[msg.sender].totalBalance += game.stake;
-            balances[msg.sender == game.creator ? game.joiner : game.creator]
-                .totalBalance -= game.stake;
-            gameEnded(gameId, msg.sender);
-        }
+        // Clean up game storage
+        delete games[gameId];
 
         game.nextTurnState = NextTurnState.Completed;
-    }
-
-    function gameEnded(uint256 gameId, address winner) internal {
-        Game storage game = games[gameId];
-        game.creatorRandomnessCommitment = bytes32(0);
-        game.joinerRandomnessSalt = bytes32(0);
-        game.creatorBoardCommitment = bytes32(0);
-        game.joinerBoardCommitment = bytes32(0);
-        game.lastActiveTimestamp = 0;
-        game.creatorGameBoard = 0;
-        game.joinerGameBoard = 0;
-        game.fireAtPosition = 0;
 
         emit GameEnded(gameId, winner);
-    }
-
-    function sendMessage(
-        address recipient,
-        string calldata message
-    ) external override {
-        emit ChatMessage(msg.sender, recipient, message);
     }
 }

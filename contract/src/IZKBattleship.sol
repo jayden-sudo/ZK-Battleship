@@ -1,28 +1,49 @@
 // SPDX-License-Identifier: GPL-3.0
 pragma solidity ^0.8.30;
 
+// =================================================================================================
+// Enums and Structs
+// =================================================================================================
+
 /**
- * @notice Represents the stored balance information for a player.
- * @dev `totalBalance` is the overall balance held on behalf of the user.
- *      `lockedBalance` represents funds that are currently reserved (for example, game stakes)
- *      and therefore not available for withdrawal until unlocked.
+ * @notice Represents the state of a player's funds within the contract.
+ * @param totalBalance The entire balance held for the user.
+ * @param lockedBalance The portion of the total balance currently reserved in an active game.
  */
 struct UserBalance {
     uint256 totalBalance;
     uint256 lockedBalance;
 }
 
+/**
+ * @notice Defines the sequence of states that a game progresses through.
+ */
 enum NextTurnState {
-    Blank, // 0
-    Join,
-    RevealRandomness,
-    CreatorFire,
-    JoinerFire,
-    CreatorReport,
-    JoinerReport,
-    Completed
+    Blank, // 0: The game is in an uninitialized or invalid state.
+    Join, // 1: The game is waiting for a second player to join.
+    RevealRandomness, // 2: Both players must reveal their randomness to determine initiative.
+    CreatorFire, // 3: It is the creator's turn to fire a shot.
+    JoinerFire, // 4: It is the joiner's turn to fire a shot.
+    CreatorReport, // 5: The creator must report the result of the joiner's shot.
+    JoinerReport, // 6: The joiner must report the result of the creator's shot.
+    Completed // 7: The game has concluded.
 }
 
+/**
+ * @notice Contains all data related to a single game instance.
+ * @param creator The address of the player who created the game.
+ * @param joiner The address of the player who joined the game.
+ * @param creatorRandomnessCommitment The creator's committed hash for determining initiative.
+ * @param joinerRandomnessSalt The joiner's revealed salt for determining initiative.
+ * @param creatorBoardCommitment The creator's committed hash of their board layout.
+ * @param joinerBoardCommitment The joiner's committed hash of their board layout.
+ * @param stake The amount of ETH (in wei) staked by each player.
+ * @param lastActiveTimestamp The timestamp of the last action taken in the game.
+ * @param creatorGameBoard A bitmask representing the state of the creator's game board.
+ * @param joinerGameBoard A bitmask representing the state of the joiner's game board.
+ * @param nextTurnState The current state indicating whose turn it is or what action is next.
+ * @param fireAtPosition The board position targeted by the last shot.
+ */
 struct Game {
     address creator;
     address joiner;
@@ -39,18 +60,30 @@ struct Game {
 }
 
 /**
+ * @notice Possible outcomes for a fired shot.
+ */
+enum ShotResult {
+    Miss, // 0: The shot did not hit any ship.
+    Hit, // 1: The shot hit a part of a ship.
+    Sunk // 2: The shot hit the final part of a ship, sinking it.
+}
+
+/**
  * @title IZKBattleship
- * @notice Minimal interface for the ZK-enabled Battleship game contract.
- * @dev This interface declares events, an enum for shot outcomes, and the core
- *      functions required to manage funds, create/join games, reveal randomness,
- *      fire shots, and report shot results together with verification proofs.
+ * @notice Interface for the ZK-Battleship game contract.
+ * @dev Defines the core functions, events, and data structures for a trustless battleship game
+ *      that leverages zero-knowledge proofs for move verification.
  */
 interface IZKBattleship {
+    // =================================================================================================
+    // Events
+    // =================================================================================================
+
     /**
      * @notice Emitted when a new game is created.
-     * @param creator The address that created the game and posted the stake.
-     * @param gameId The unique identifier assigned to the new game.
-     * @param stake Amount of ETH (in wei) locked as the game stake.
+     * @param creator The address of the player who created the game.
+     * @param gameId The unique identifier for the new game.
+     * @param stake The amount of ETH (in wei) staked by the creator.
      */
     event GameCreated(
         address indexed creator,
@@ -60,23 +93,23 @@ interface IZKBattleship {
 
     /**
      * @notice Emitted when a player joins an existing game.
-     * @param joiner The address of the player who joined the game.
-     * @param gameId The identifier of the game that was joined.
+     * @param joiner The address of the player who joined.
+     * @param gameId The identifier of the game being joined.
      */
     event GameJoined(address indexed joiner, uint256 indexed gameId);
 
     /**
-     * @notice Emitted when a player reveals their previously committed randomness.
-     * @param gameId The identifier of the game where randomness was revealed.
-     * @param initiativePlayer The address of the player who will take the first turn.
+     * @notice Emitted after both players have revealed their randomness.
+     * @param gameId The identifier of the game.
+     * @param initiativePlayer The address of the player who won the initiative and will fire first.
      */
     event RandomnessRevealed(uint256 indexed gameId, address initiativePlayer);
 
     /**
-     * @notice Emitted when a player fires a shot in a game.
-     * @param gameId The identifier of the game in which the shot was fired.
+     * @notice Emitted when a player fires a shot.
+     * @param gameId The identifier of the game.
      * @param attacker The address of the player who fired the shot.
-     * @param firePosition Encoded board position (e.g., cell index) targeted by the shot.
+     * @param firePosition The board position (0-63) targeted by the shot.
      */
     event ShotFired(
         uint256 indexed gameId,
@@ -85,22 +118,10 @@ interface IZKBattleship {
     );
 
     /**
-     * @notice Possible outcomes for a fired shot.
-     * @dev Use these values when reporting shot results: Error = invalid, Miss = no ship,
-     *      Hit = ship part was hit, Sunk = ship fully destroyed.
-     */
-    enum ShotResult {
-        Miss, // 0
-        Hit, // 1
-        Sunk // 2
-    }
-
-    /**
-     * @notice Emitted by a defender after verifying and reporting the result of an incoming shot
-     *         (typically together with a zero-knowledge proof).
-     * @param gameId The identifier of the game in which the shot occurred.
-     * @param defender The address of the player who defended (reported the result).
-     * @param result The validated result of the shot (Error/Miss/Hit/Sunk).
+     * @notice Emitted when a defender reports the result of a shot, backed by a ZK proof.
+     * @param gameId The identifier of the game.
+     * @param defender The address of the player reporting the shot result.
+     * @param result The outcome of the shot (Miss, Hit, or Sunk).
      */
     event ShotResultReported(
         uint256 indexed gameId,
@@ -109,57 +130,85 @@ interface IZKBattleship {
     );
 
     /**
-     * @notice Emitted when a game finishes and a winner is determined.
+     * @notice Emitted when a game has been won.
      * @param gameId The identifier of the completed game.
      * @param winner The address of the player who won the game.
      */
     event GameEnded(uint256 indexed gameId, address indexed winner);
 
+    /**
+     * @notice Emitted when a player sends a message to another player.
+     * @param sender The address of the message sender.
+     * @param recipient The address of the message recipient.
+     * @param message The content of the message.
+     */
     event ChatMessage(
         address indexed sender,
         address indexed recipient,
         string message
     );
 
+    // =================================================================================================
+    // View Functions
+    // =================================================================================================
+
+    /**
+     * @notice Lists all games currently waiting for a joiner.
+     * @param from The starting index for pagination.
+     * @param limit The maximum number of game IDs to return.
+     * @return An array of game IDs.
+     */
     function listWaitingGames(
         uint256 from,
         uint256 limit
     ) external view returns (uint256[] memory);
 
+    /**
+     * @notice Retrieves the ID of the game a user is currently participating in.
+     * @param user The address of the player.
+     * @return gameId The ID of the active game, or 0 if the user is not in a game.
+     */
+    function getUserGameId(address user) external view returns (uint256 gameId);
+
+    /**
+     * @notice Fetches the complete data structure for a specific game.
+     * @param gameId The identifier of the game to retrieve.
+     * @return A `Game` struct containing all on-chain data for the game.
+     */
     function getGameData(uint256 gameId) external view returns (Game memory);
 
-
     /**
-     * @notice Deposit ETH into the caller's account held by the contract.
-     * @dev The caller should send ETH with the transaction (msg.value).
-     */
-    function deposit() external payable;
-
-    /**
-     * @notice Withdraw unlocked ETH from the caller's account and transfer it to `recipient`.
-     * @dev Implementations must ensure that only available (unlocked) funds can be withdrawn
-     *      and should protect against reentrancy and other common risks.
-     * @param amount The amount of ETH (in wei) to withdraw.
-     * @param recipient The address that will receive the withdrawn ETH.
-     */
-    function withdraw(uint256 amount, address recipient) external;
-
-    /**
-     * @notice Retrieve balance information for `user`.
-     * @param user The address whose balance is being queried.
-     * @return UserBalance A struct containing `totalBalance` and `lockedBalance` for the user.
+     * @notice Retrieves the balance information for a specified user.
+     * @param user The address to query.
+     * @return A `UserBalance` struct with the user's total and locked balances.
      */
     function getUserBalance(
         address user
     ) external view returns (UserBalance memory);
 
+    // =================================================================================================
+    // State-Changing Functions
+    // =================================================================================================
+
     /**
-     * @notice Create a new game by committing necessary secrets and posting a stake.
-     * @dev `randomnessCommitment` and `boardCommitment` are commitments (hashes) that will
-     *      later be revealed and verified. `stake` is locked until the game concludes.
-     * @param randomnessCommitment Commitment to per-game randomness provided by the creator.
-     * @param boardCommitment Commitment to the creator's board layout (e.g., Merkle root or hash).
-     * @param stake Amount of ETH (in wei) to lock as the creator's stake for the game.
+     * @notice Deposits ETH into the contract, crediting the caller's balance.
+     * @dev The amount is determined by `msg.value`.
+     */
+    function deposit() external payable;
+
+    /**
+     * @notice Withdraws ETH from the caller's available (unlocked) balance.
+     * @param amount The amount of ETH (in wei) to withdraw.
+     * @param recipient The address to receive the withdrawn funds.
+     */
+    function withdraw(uint256 amount, address recipient) external;
+
+    /**
+     * @notice Creates a new game and puts it in a waiting state.
+     * @dev Locks the creator's stake and commits to their board layout and randomness.
+     * @param randomnessCommitment A hash of the creator's secret randomness value.
+     * @param boardCommitment A commitment (e.g., hash or Merkle root) of the board layout.
+     * @param stake The amount of ETH (in wei) to stake on the game.
      */
     function createGame(
         bytes32 randomnessCommitment,
@@ -168,11 +217,11 @@ interface IZKBattleship {
     ) external payable;
 
     /**
-     * @notice Join an existing game by providing commitments for randomness and board layout.
-     * @dev The joiner must satisfy any stake or match conditions required by the game creator.
+     * @notice Joins an existing game created by another player.
+     * @dev Requires matching the creator's stake and committing to a board layout and randomness.
      * @param gameId The identifier of the game to join.
-     * @param randomnessSalt per-game randomness.
-     * @param boardCommitment Commitment to the joiner's board layout.
+     * @param randomnessSalt The joiner's secret randomness value (salt).
+     * @param boardCommitment A commitment to the joiner's board layout.
      */
     function joinGame(
         uint256 gameId,
@@ -181,38 +230,41 @@ interface IZKBattleship {
     ) external payable;
 
     /**
-     * @notice Quit or forfeit an in-progress or not-yet-started game.
-     * @dev The exact behavior (refunds, penalties, state transitions) is implementation-defined
-     *      and handled by the concrete contract.
-     * @param gameId The identifier of the game to quit.
+     * @notice Allows a player to forfeit and leave an ongoing game.
+     * @dev The opponent will be declared the winner and will claim the stake.
+     * @param gameId The identifier of the game to leave.
      */
-    function quitGame(uint256 gameId) external;
+    function leaveGame(uint256 gameId) external;
 
     /**
-     * @notice Reveal the preimage (salt) for a previously submitted randomness commitment.
-     * @dev Revealing the randomness allows the contract and the opponent to verify the
-     *      original commitment and resolve any randomness-dependent game mechanics.
-     * @param gameId The identifier of the game for which randomness is revealed.
-     * @param randomnessSalt The secret salt whose hash was previously committed.
+     * @notice Allows a player to claim victory if the opponent has been inactive for too long.
+     * @dev The timeout period is defined in the contract implementation.
+     * @param gameId The identifier of the game to terminate.
+     */
+    function terminateGame(uint256 gameId) external;
+
+    /**
+     * @notice Reveals the creator's secret randomness after a joiner is present.
+     * @dev This action allows the contract to determine which player has the first turn.
+     * @param gameId The identifier of the game.
+     * @param randomnessSalt The secret value corresponding to the previously submitted commitment.
      */
     function revealRandomness(uint256 gameId, bytes32 randomnessSalt) external;
 
     /**
-     * @notice Fire a shot at the specified position in `gameId`.
-     * @dev `firePosition` encodes the target cell; the current game state must permit the
-     *      caller to act. This call typically emits `ShotFired` and advances the turn.
-     * @param gameId The identifier of the game where the shot is fired.
-     * @param firePosition The encoded board cell index being targeted.
+     * @notice Fires a shot at a specified position on the opponent's board.
+     * @dev The game state must allow the caller to make a move.
+     * @param gameId The identifier of the game.
+     * @param firePosition The board position (0-63) to target.
      */
     function shoot(uint256 gameId, uint8 firePosition) external;
 
     /**
-     * @notice Report the result of a shot together with a verification proof (e.g., ZK proof).
-     * @dev The `proof` bytes are verified on-chain to ensure the reported result matches the
-     *      defender's committed board without revealing sensitive board details.
-     * @param gameId The identifier of the relevant game.
-     * @param shotResult The reported outcome (Error/Miss/Hit/Sunk).
-     * @param proof Serialized proof data used to validate the correctness of `shotResult`.
+     * @notice Reports the result of an opponent's shot using a zero-knowledge proof.
+     * @dev The proof is verified on-chain to confirm the outcome without revealing the board state.
+     * @param gameId The identifier of the game.
+     * @param shotResult The reported outcome of the shot (Miss, Hit, or Sunk).
+     * @param proof The serialized ZK proof data that validates the reported result.
      */
     function reportShotResult(
         uint256 gameId,
@@ -220,5 +272,10 @@ interface IZKBattleship {
         bytes calldata proof
     ) external;
 
+    /**
+     * @notice Sends an on-chain message to another player.
+     * @param recipient The address of the player to receive the message.
+     * @param message The text content of the message.
+     */
     function sendMessage(address recipient, string calldata message) external;
 }
