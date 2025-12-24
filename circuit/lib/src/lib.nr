@@ -86,6 +86,12 @@ pub fn init_board(cruiser: [u8; 3], destroyer: [u8; 2], submarine: u8, salt: Fie
     Poseidon2::hash(params, params.len())
 }
 
+pub struct ShotResult {
+    pub status: u8,
+    pub sunk_head_position: u8,
+    pub sunk_end_position: u8,
+}
+
 /**
  * @notice Determines the result of a shot based on the board layout and previous hits.
  * @dev Checks if a shot is a Miss, Hit, or Sunk. A "Sunk" occurs if the shot hits
@@ -103,27 +109,32 @@ pub fn process_shot(
     submarine: u8,
     grid_snapshot_bits: [u1; 36],
     shot_position: u8,
-) -> u8 {
+) -> ShotResult {
     // Ensure the shot is within the board and hasn't been fired before.
     assert(shot_position < 36);
     assert(grid_snapshot_bits[shot_position as u32] == 0, "Position already shot at");
 
-    let mut status = STATUS_MISS;
+    let mut shotResult =
+        ShotResult { status: STATUS_MISS, sunk_head_position: 0, sunk_end_position: 0 };
 
     // Check if the shot hits the cruiser.
-    if status == STATUS_MISS {
+    if shotResult.status == STATUS_MISS {
         for i in 0..cruiser.len() {
-            if status == STATUS_MISS {
+            if shotResult.status == STATUS_MISS {
                 if shot_position == cruiser[i] {
-                    status = STATUS_SUNK;
+                    shotResult.status = STATUS_SUNK;
                     for j in 0..cruiser.len() {
                         if j != i {
-                            if status == STATUS_SUNK {
+                            if shotResult.status == STATUS_SUNK {
                                 if grid_snapshot_bits[cruiser[j] as u32] == 0 {
-                                    status = STATUS_HIT;
+                                    shotResult.status = STATUS_HIT;
                                 }
                             }
                         }
+                    }
+                    if shotResult.status == STATUS_SUNK {
+                        shotResult.sunk_head_position = cruiser[0];
+                        shotResult.sunk_end_position = cruiser[cruiser.len() - 1];
                     }
                 }
             }
@@ -131,19 +142,23 @@ pub fn process_shot(
     }
 
     // Check if the shot hits the destroyer.
-    if status == STATUS_MISS {
+    if shotResult.status == STATUS_MISS {
         for i in 0..destroyer.len() {
-            if status == STATUS_MISS {
+            if shotResult.status == STATUS_MISS {
                 if shot_position == destroyer[i] {
-                    status = STATUS_SUNK;
+                    shotResult.status = STATUS_SUNK;
                     for j in 0..destroyer.len() {
                         if j != i {
-                            if status == STATUS_SUNK {
+                            if shotResult.status == STATUS_SUNK {
                                 if grid_snapshot_bits[destroyer[j] as u32] == 0 {
-                                    status = STATUS_HIT;
+                                    shotResult.status = STATUS_HIT;
                                 }
                             }
                         }
+                    }
+                    if shotResult.status == STATUS_SUNK {
+                        shotResult.sunk_head_position = destroyer[0];
+                        shotResult.sunk_end_position = destroyer[destroyer.len() - 1];
                     }
                 }
             }
@@ -151,13 +166,15 @@ pub fn process_shot(
     }
 
     // Check if the shot hits the submarine. A single hit sinks it.
-    if status == STATUS_MISS {
+    if shotResult.status == STATUS_MISS {
         if shot_position == submarine {
-            status = STATUS_SUNK;
+            shotResult.status = STATUS_SUNK;
+            shotResult.sunk_head_position = submarine;
+            shotResult.sunk_end_position = submarine;
         }
     }
 
-    status
+    shotResult
 }
 
 // =================================================================================================

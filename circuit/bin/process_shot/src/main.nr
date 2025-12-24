@@ -42,13 +42,15 @@ fn main(
     assert(hash == expected_hash, "Computed hash does not match expected hash");
 
     // Unpack the public input to extract game state information.
-    // The `pub_input` is structured as follows (from LSB to MSB):
-    // - Bits 0-3:   hit_status
-    // - Bits 4-11:  shot_position
-    // - Bits 12-47: grid_snapshot (36 bits)
+    // The `pub_input` is structured as follows:
+    // - Bits 0-3:    hit_status
+    // - Bits 4-11:   shot_position
+    // - Bits 12-47:  grid_snapshot (36 bits)
+    // - Bits 48-55:  sunk_head_position
+    // - Bits 56-63:  sunk_end_position
     let hit_status: u8 = (pub_input & 0x0f) as u8;
     let shot_position: u8 = ((pub_input >> 4) & 0xff) as u8;
-    
+
     // Extract the 36-bit grid snapshot into an array of bits.
     let mut grid_snapshot_bits: [u1; 36] = [0; 36];
     let _pub_input = pub_input >> 12;
@@ -56,19 +58,29 @@ fn main(
     for i in 0..grid_snapshot_bits_len {
         grid_snapshot_bits[i as u32] = ((_pub_input >> (grid_snapshot_bits_len - 1 - i)) & 1) as u1;
     }
+    let sunk_head_position: u8 = ((pub_input >> 48) & 0xff) as u8;
+    let sunk_end_position: u8 = ((pub_input >> 56) & 0xff) as u8;
 
     // Process the shot using the private board layout and public game state to compute the true outcome.
-    let status = process_shot(
+    let shotResult = process_shot(
         cruiser,
         destroyer,
         submarine,
         grid_snapshot_bits,
         shot_position,
     );
-    
+
     // Assert that the privately computed status matches the publicly declared hit_status.
     // This is the core constraint for verifying the shot report.
-    assert(status == hit_status, "Computed shot status does not match public hit status");
+    assert(
+        shotResult.status == hit_status,
+        "Computed shot status does not match public hit status",
+    );
+    assert(
+        shotResult.sunk_head_position == sunk_head_position,
+        "Sunk head position does not match",
+    );
+    assert(shotResult.sunk_end_position == sunk_end_position, "Sunk head position does not match");
 }
 
 /// A test helper function to convert a 36-bit array (big-endian) to a u64.
@@ -92,15 +104,42 @@ fn test_main() {
     let submarine: u8 = 21;
     let salt: Field = 7;
     let expected_hash: Field = 0x04df209ed0aad0968c3aa95d735485f04ed83fb29173287fda6716461da5815d;
-    
+
     // Initialize an empty grid snapshot, representing no previous hits.
     let mut grid_snapshot_bits: [u1; 36] = [0; 36];
-    
+    /*
+    * +--------+---+---+---+---+--------+
+    * |    +--+|   |   |   |   |        |
+    * |    |0 ||1  |2  |3  |4  |5       |
+    * |    |  ||   |   |   |   |        |
+    * +----|--|+---+---+---+---+--------+
+    * |    |  ||   |   |   |   |        |
+    * |    |6 ||7  |8  |9  |10 |11      |
+    * |    |  ||   |   |   |   |        |
+    * +----|--|+---+---+---+---+--------+
+    * |    |  ||   +------+|   |        |
+    * |    |12||13 |14 |15||16 |17      |
+    * |    +--+|   +------+|   |        |
+    * +--------+---+---+---+---+--------+
+    * |        |   |   +--+|   |        |
+    * |     18 |17 |20 |21||22 |23      |
+    * |        |   |   +--+|   |        |
+    * +--------+---+---+---+---+--------+
+    * |        |   |   |   |   |        |
+    * |     24 |25 |26 |27 |28 |29      |
+    * |        |   |   |   |   |        |
+    * +--------+---+---+---+---+--------+
+    * |        |   |   |   |   |        |
+    * |     30 |31 |32 |33 |34 |35      |
+    * |        |   |   |   |   |        |
+    * +--------+---+---+---+---+--------+
+    */
+
     // The test simulates a player firing at every cell (0-35) of the board.
     for i in 0..36 {
         println(f"round: {i}");
         let mut hit_status = 0;
-        
+
         // Define the expected outcome for shots that hit a ship.
         if i == 0 {
             hit_status = STATUS_HIT;
@@ -119,7 +158,15 @@ fn test_main() {
         }
 
         // Pack the public inputs for the main circuit function.
-        let pub_input: u64 = hit_status as u64 + (i << 4u64) + (be_bits_to_u64(grid_snapshot_bits) << 12);
+        let mut pub_input: u64 =
+            hit_status as u64 + (i << 4u64) + (be_bits_to_u64(grid_snapshot_bits) << 12);
+        if i == 12 {
+            pub_input = pub_input + ((0 << 48) + (12 << 56))
+        } else if i == 15 {
+            pub_input = pub_input + ((14 << 48) + (15 << 56))
+        } else if i == 21 {
+            pub_input = pub_input + ((21 << 48) + (21 << 56))
+        }
 
         // Run the circuit with the current shot's data.
         main(

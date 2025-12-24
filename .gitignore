@@ -5,3 +5,7 @@
 /contract/out
 /node_modules
 /target
+/contract/verifier/out
+/contract/verifier/cache
+/broadcast
+/contract/verifier/broadcast

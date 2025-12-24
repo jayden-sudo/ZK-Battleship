@@ -1,5 +1,4 @@
 import shell from 'shelljs';
-import path from 'path';
 import fs from 'fs';
 
 async function main() {

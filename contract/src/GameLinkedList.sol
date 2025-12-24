@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.28;
+pragma solidity ^0.8.30;
 
 library GameLinkedList {
     uint256 internal constant SENTINEL_UINT256 = 1;

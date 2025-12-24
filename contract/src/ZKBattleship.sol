@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0
 pragma solidity ^0.8.30;
 
-import {IZKBattleship, UserBalance, Game, NextTurnState, ShotResult} from "./IZKBattleship.sol";
+import {IZKBattleship, UserBalance, Game, NextTurnState, ShotResult, ShotStatus} from "./IZKBattleship.sol";
 import {GameLinkedList} from "./GameLinkedList.sol";
-import {IVerifier} from "./Verifier.sol";
+import {IVerifier} from "./IVerifier.sol";
 
 /**
  * @title ZKBattleship
@@ -185,7 +185,7 @@ contract ZKBattleship is IZKBattleship {
         games[gameId] = newGame;
         waitingGames.add(gameId);
 
-        emit GameCreated(msg.sender, gameId, stake);
+        emit GameCreated(gameId, msg.sender, stake);
     }
 
     /**
@@ -226,7 +226,7 @@ contract ZKBattleship is IZKBattleship {
         game.lastActiveTimestamp = uint64(block.timestamp);
         game.nextTurnState = NextTurnState.RevealRandomness;
 
-        emit GameJoined(msg.sender, gameId);
+        emit GameJoined(gameId, msg.sender);
     }
 
     /**
@@ -307,7 +307,7 @@ contract ZKBattleship is IZKBattleship {
      */
     function reportShotResult(
         uint256 gameId,
-        ShotResult shotResult,
+        ShotResult memory shotResult,
         bytes calldata proof
     ) external override {
         Game storage game = games[gameId];
@@ -350,7 +350,10 @@ contract ZKBattleship is IZKBattleship {
         );
 
         // If the shot was a hit or sunk a ship, update the game board
-        if (shotResult == ShotResult.Hit || shotResult == ShotResult.Sunk) {
+        if (
+            shotResult.shotStatus == ShotStatus.Hit ||
+            shotResult.shotStatus == ShotStatus.Sunk
+        ) {
             uint64 newGameBoard = gameBoard |
                 (uint64(1) << ((36) - 1 - game.fireAtPosition));
 
@@ -540,16 +543,18 @@ contract ZKBattleship is IZKBattleship {
         bytes32 boardCommitment,
         uint64 gameBoard,
         uint8 firePosition,
-        ShotResult shotResult,
+        ShotResult memory shotResult,
         bytes calldata proof
     ) internal returns (bool) {
         bytes32[] memory publicInputs = new bytes32[](2);
         publicInputs[0] = boardCommitment;
         // Pack game state data into a single bytes32 public input.
         publicInputs[1] = bytes32(
-            (uint256(gameBoard) << 12) +
+            (uint256(shotResult.sunkHeadPosition) << 48) +
+                (uint256(shotResult.sunkEndPosition) << 56) +
+                (uint256(gameBoard) << 12) +
                 (uint256(firePosition) << 4) +
-                uint256(shotResult)
+                uint256(shotResult.shotStatus)
         );
         return VERIFIER.verify(proof, publicInputs);
     }

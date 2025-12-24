@@ -60,9 +60,18 @@ struct Game {
 }
 
 /**
+ * @notice
+ */
+struct ShotResult {
+    ShotStatus shotStatus;
+    uint8 sunkHeadPosition;
+    uint8 sunkEndPosition;
+}
+
+/**
  * @notice Possible outcomes for a fired shot.
  */
-enum ShotResult {
+enum ShotStatus {
     Miss, // 0: The shot did not hit any ship.
     Hit, // 1: The shot hit a part of a ship.
     Sunk // 2: The shot hit the final part of a ship, sinking it.
@@ -81,22 +90,22 @@ interface IZKBattleship {
 
     /**
      * @notice Emitted when a new game is created.
-     * @param creator The address of the player who created the game.
      * @param gameId The unique identifier for the new game.
+     * @param creator The address of the player who created the game.
      * @param stake The amount of ETH (in wei) staked by the creator.
      */
     event GameCreated(
-        address indexed creator,
         uint256 indexed gameId,
+        address indexed creator,
         uint256 stake
     );
 
     /**
      * @notice Emitted when a player joins an existing game.
-     * @param joiner The address of the player who joined.
      * @param gameId The identifier of the game being joined.
+     * @param joiner The address of the player who joined.
      */
-    event GameJoined(address indexed joiner, uint256 indexed gameId);
+    event GameJoined(uint256 indexed gameId, address indexed joiner);
 
     /**
      * @notice Emitted after both players have revealed their randomness.
@@ -263,12 +272,12 @@ interface IZKBattleship {
      * @notice Reports the result of an opponent's shot using a zero-knowledge proof.
      * @dev The proof is verified on-chain to confirm the outcome without revealing the board state.
      * @param gameId The identifier of the game.
-     * @param shotResult The reported outcome of the shot (Miss, Hit, or Sunk).
+     * @param shotResult The reported outcome of the shot.
      * @param proof The serialized ZK proof data that validates the reported result.
      */
     function reportShotResult(
         uint256 gameId,
-        ShotResult shotResult,
+        ShotResult memory shotResult,
         bytes calldata proof
     ) external;
 
