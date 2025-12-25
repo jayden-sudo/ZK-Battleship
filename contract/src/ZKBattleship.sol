@@ -551,7 +551,6 @@ contract ZKBattleship is IZKBattleship {
         ShotResult memory shotResult,
         bytes calldata proof
     ) internal returns (bool) {
-        return true;
         bytes32[] memory publicInputs = new bytes32[](2);
         publicInputs[0] = boardCommitment;
         // Pack game state data into a single bytes32 public input.
