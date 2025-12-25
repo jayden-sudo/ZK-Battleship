@@ -130,11 +130,13 @@ interface IZKBattleship {
      * @notice Emitted when a defender reports the result of a shot, backed by a ZK proof.
      * @param gameId The identifier of the game.
      * @param defender The address of the player reporting the shot result.
+     * @param firePosition The board position (0-63) to target.
      * @param result The outcome of the shot (Miss, Hit, or Sunk).
      */
     event ShotResultReported(
         uint256 indexed gameId,
         address indexed defender,
+        uint8 firePosition,
         ShotResult result
     );
 

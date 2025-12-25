@@ -6,8 +6,9 @@
         "test:circuit": "nargo test",
         "build:contract": "forge build --sizes && cd ./contract/verifier && forge build --sizes",
         "test:contract": "forge test --gas-report && cd ./contract/verifier && forge test --gas-report",
-        "write_vk": "bb write_vk --scheme ultra_honk  --oracle_hash keccak -b ./target/process_shot.json -o ./target",
-        "generate_zk_verify_contract": "bb write_solidity_verifier --scheme ultra_honk --optimized -k ./target/vk -o ./contract/verifier/src/Verifier.sol",
+        "[removed]write_vk": "bb write_vk --scheme ultra_honk  --oracle_hash keccak -b ./target/process_shot.json -o ./target",
+        "[removed]generate_zk_verify_contract": "bb write_solidity_verifier --scheme ultra_honk --optimized -k ./target/vk -o ./contract/verifier/src/Verifier.sol",
+        "generate_zk_verify_contract": "ts-node ./js/write_solidity_verifier.ts",
         "test_prove": "ts-node ./js/prove.ts",
         "test": "ts-node ./js/test.ts"
     },
