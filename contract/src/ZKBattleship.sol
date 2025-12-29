@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0
 pragma solidity ^0.8.30;
 
-import {IZKBattleship, UserBalance, Game, NextTurnState, ShotResult, ShotStatus} from "./IZKBattleship.sol";
-import {GameLinkedList} from "./GameLinkedList.sol";
+import {IZKBattleship, UserBalance, Game, NextTurnState, ShotResult, ShotStatus, DashBoard} from "./IZKBattleship.sol";
+import {UintLinkedList} from "./UintLinkedList.sol";
 import {IVerifier} from "./IVerifier.sol";
 
 /**
@@ -12,7 +12,7 @@ import {IVerifier} from "./IVerifier.sol";
  *      It relies on a Verifier contract to validate proofs for game actions.
  */
 contract ZKBattleship is IZKBattleship {
-    using GameLinkedList for mapping(uint256 => uint256);
+    using UintLinkedList for mapping(uint256 => uint256);
 
     // =================================================================================================
     // State Variables
@@ -29,6 +29,9 @@ contract ZKBattleship is IZKBattleship {
 
     /// @notice The counter for generating unique game IDs.
     uint256 private nextGameId = 10;
+
+    DashBoard public dashBoard =
+        DashBoard({InProgress: 0, Completed: 0, Waiting: 0});
 
     /// @notice Maps user addresses to their fund balances.
     mapping(address => UserBalance) private balances;
@@ -184,6 +187,7 @@ contract ZKBattleship is IZKBattleship {
 
         games[gameId] = newGame;
         waitingGames.add(gameId);
+        dashBoard.Waiting++;
 
         emit GameCreated(gameId, msg.sender, stake);
     }
@@ -225,6 +229,8 @@ contract ZKBattleship is IZKBattleship {
         game.joinerBoardCommitment = boardCommitment;
         game.lastActiveTimestamp = uint64(block.timestamp);
         game.nextTurnState = NextTurnState.RevealRandomness;
+        dashBoard.InProgress++;
+        dashBoard.Waiting--;
 
         emit GameJoined(gameId, msg.sender);
     }
@@ -434,6 +440,7 @@ contract ZKBattleship is IZKBattleship {
             balances[msg.sender].totalBalance -= game.stake;
         }
 
+        emit PlayerQuit(gameId, msg.sender);
         _gameEnded(gameId, opponent);
     }
 
@@ -501,6 +508,7 @@ contract ZKBattleship is IZKBattleship {
         balances[msg.sender].totalBalance += game.stake;
         balances[opponent].totalBalance -= game.stake;
 
+        emit PlayerTimeout(gameId, opponent);
         _gameEnded(gameId, msg.sender);
     }
 
@@ -508,10 +516,11 @@ contract ZKBattleship is IZKBattleship {
      * @inheritdoc IZKBattleship
      */
     function sendMessage(
+        uint256 gameId,
         address recipient,
         string calldata message
     ) external override {
-        emit ChatMessage(msg.sender, recipient, message);
+        emit ChatMessage(gameId, msg.sender, recipient, message);
     }
 
     // =================================================================================================
@@ -594,10 +603,12 @@ contract ZKBattleship is IZKBattleship {
             userGameIds[game.joiner] = 0;
         }
 
+        // game.nextTurnState = NextTurnState.Completed;
         // Clean up game storage
         delete games[gameId];
 
-        game.nextTurnState = NextTurnState.Completed;
+        dashBoard.Completed++;
+        dashBoard.InProgress--;
 
         emit GameEnded(gameId, winner);
     }

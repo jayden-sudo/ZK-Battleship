@@ -34,28 +34,41 @@ pub fn init_board(cruiser: [u8; 3], destroyer: [u8; 2], submarine: u8, salt: Fie
     let max_value: u8 = 36; // 6x6 grid, positions 0..35
 
     // Validate cruiser placement: check bounds and contiguity.
-    for i in 0..cruiser.len() {
-        assert(cruiser[i] < max_value);
-        if i > 0 {
-            assert(cruiser[i - 1] < cruiser[i]); // Assert coordinates are sorted
-            let s = cruiser[i] - cruiser[i - 1];
-            // Must be adjacent horizontally (1) or vertically (6)
-            if s != 1 {
-                assert(s == 6);
+    {
+        assert(cruiser[cruiser.len() - 1] < max_value);
+        let p0_x: u8 = cruiser[0] / 6;
+        let p0_y = cruiser[0] % 6;
+        let p1_x = cruiser[1] / 6;
+        let p1_y = cruiser[1] % 6;
+        if p0_x == p1_x {
+            for i in 1..cruiser.len() {
+                assert(cruiser[i] - cruiser[i - 1] == 1);
+                assert(cruiser[i] / 6 == p0_x);
             }
+        } else if p0_y == p1_y {
+            for i in 1..cruiser.len() {
+                assert(cruiser[i] - cruiser[i - 1] == 6);
+                assert(cruiser[i] % 6 == p0_y);
+            }
+        } else {
+            assert(false);
         }
     }
 
     // Validate destroyer placement: check bounds and contiguity.
-    for i in 0..destroyer.len() {
-        assert(destroyer[i] < max_value);
-        if i > 0 {
-            assert(destroyer[i - 1] < destroyer[i]); // Assert coordinates are sorted
-            let s = destroyer[i] - destroyer[i - 1];
-            // Must be adjacent horizontally (1) or vertically (6)
-            if s != 1 {
-                assert(s == 6);
-            }
+    {
+        assert(destroyer[destroyer.len() - 1] < max_value);
+        let p0_x: u8 = destroyer[0] / 6;
+        let p0_y = destroyer[0] % 6;
+        let p1_x = destroyer[1] / 6;
+        let p1_y = destroyer[1] % 6;
+
+        if p0_x == p1_x {
+            assert(destroyer[1] - destroyer[0] == 1);
+        } else if p0_y == p1_y {
+            assert(destroyer[1] - destroyer[0] == 6);
+        } else {
+            assert(false);
         }
     }
 

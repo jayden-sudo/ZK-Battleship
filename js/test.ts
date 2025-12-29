@@ -1,104 +1,248 @@
-import { ethers } from "ethers";
-import shell from 'shelljs';
-import { Player } from './player';
-import path from "node:path";
-import { readFileSync } from "node:fs";
+import { ProofData, UltraHonkBackend, BarretenbergSync, Barretenberg, Fr, deflattenFields, reconstructHonkProof, splitHonkProof } from '@aztec/bb.js';
+import { InputMap, Noir } from '@noir-lang/noir_js';
+import { readFileSync } from "fs";
+import path from 'path';
+
+function getVK(vk: Uint8Array) {
+    const result = [];
+    for (let i = 0; i < vk.length; i += 16) {
+        const chunk = vk.slice(i, i + 16);
+        result.push('0x' + Buffer.from(chunk).toString("hex"));
+    }
+    if (result.length !== 118) {
+        throw new Error('vk error');
+    }
+    return result;
+}
+
+
+function uint8ArrayToHex(buffer: Uint8Array): string {
+    const hex: string[] = [];
+
+    buffer.forEach(function (i) {
+        let h = i.toString(16);
+        if (h.length % 2) {
+            h = '0' + h;
+        }
+        hex.push(h);
+    });
+
+    return '0x' + hex.join('');
+}
+
+function reconstructProofWithPublicInputs(proofData: ProofData) {
+    // Flatten publicInputs
+    const publicInputsConcatenated = flattenUint8Arrays(proofData.publicInputs);
+    // Concatenate publicInputs and proof
+    const proofWithPublicInputs = Uint8Array.from([...publicInputsConcatenated, ...proofData.proof]);
+    return proofWithPublicInputs;
+}
+function flattenUint8Arrays(arrays: any[]) {
+    const totalLength = arrays.reduce((acc, val) => acc + val.length, 0);
+    const result = new Uint8Array(totalLength);
+    let offset = 0;
+    for (const arr of arrays) {
+        result.set(arr, offset);
+        offset += arr.length;
+    }
+    return result;
+}
+
+function flattenFieldsAsArray(fields: string[]): Uint8Array {
+    const flattenedPublicInputs = fields.map(hexToUint8Array);
+    return flattenUint8Arrays(flattenedPublicInputs);
+}
+
+function hexToUint8Array(hex: string): Uint8Array {
+    const sanitised_hex = BigInt(hex).toString(16).padStart(64, '0');
+
+    const len = sanitised_hex.length / 2;
+    const u8 = new Uint8Array(len);
+
+    let i = 0;
+    let j = 0;
+    while (i < len) {
+        u8[i] = parseInt(sanitised_hex.slice(j, j + 2), 16);
+        i += 1;
+        j += 2;
+    }
+
+    return u8;
+}
+
+
+const serializedBufferSize = 4;
+const fieldByteSize = 32;
+const publicInputOffset = 3;
+const publicInputsOffsetBytes = publicInputOffset * fieldByteSize;
+
+function reconstructProofWithPublicInputsHonk(proofData: ProofData): Uint8Array {
+    // Flatten publicInputs
+    const publicInputsConcatenated = flattenFieldsAsArray(proofData.publicInputs);
+
+    const proofStart = proofData.proof.slice(0, publicInputsOffsetBytes + serializedBufferSize);
+    const proofEnd = proofData.proof.slice(publicInputsOffsetBytes + serializedBufferSize);
+
+    // Concatenate publicInputs and proof
+    const proofWithPublicInputs = Uint8Array.from([...proofStart, ...publicInputsConcatenated, ...proofEnd]);
+
+    return proofWithPublicInputs;
+}
 
 async function main() {
-    const bins = ['npm', 'curl', 'nargo', 'bb', 'anvil', 'cast', 'pkill'];
-    for (const bin of bins) {
-        if (!shell.which(bin)) {
-            shell.echo('this script requires ' + bin);
-            shell.exit(1);
-        }
-    }
 
-    shell.exec("pkill -f anvil");
-    shell.exec("anvil --block-time 0.1 --port 8545 &", { async: true, silent: true });
-    shell.exec("npm run build:circuit && npm run build:contract");
-    const http_rpc = 'http://127.0.0.1:8545';
-    for (let i = 0; i < 10; i++) {
-        await sleep(300);
-        const re = shell.exec(`curl ${http_rpc} -X POST -H "Content-Type: application/json" --data '{"method":"eth_blockNumber","params":[],"id":1,"jsonrpc":"2.0"}'`);
-        if (re.stdout.startsWith('{"jsonrpc":"2.0"')) {
-            break;
-        }
-    }
+    let proofData_inner: ProofData;
+    let vkHash: string;
+    let vkAsFields: string[];
 
-    const rpc = new ethers.JsonRpcProvider(http_rpc);
-
-    const privateKeys = [
-        '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80',
-        '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d',
-        '0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a',
-        '0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6',
-        '0x47e179ec197488593b187f80a00eb0da91f1b9d0b13f8733639f19c30a34926a',
-        '0x8b3a350cf5c34c9194ca85829a2df0ec3153be0318b5e2d3348e872092edffba',
-        '0x92db14e403b83dfe3df233f83dfa3a0d7096f21ca9b0d6d6b8d88b2b4ec1564e',
-        '0x4bbbf85ce3377467afe5d46f804f221813b2bb87f24d81f60f1fcdbf7cbf4356',
-        '0xdbda1821b80551c9d65939329250298aa3472ba22feea921c0cf5d620ea67b97',
-        '0x2a871d0798f97d79848a013d4936a73bf4cc922c825d33c1cf7073dff6d409c6'
-    ];
-
-    let ZKBattleshipAddress;
+    const bb = await BarretenbergSync.initSingleton();
+    const bb1 = await Barretenberg.new();
+    let vk: Uint8Array;
     {
-        let forgescriptout = shell.exec(
-            `cd ./contract/verifier/ && forge script ./script/Verifier.s.sol --rpc-url ${http_rpc} --broadcast`,
-            {
-                env: {
-                    ...process.env,
-                    DEPLOYER_PRIVATE_KEY: privateKeys[0],
-                },
-            }
-        ).stdout;
-        let index = forgescriptout.indexOf('##Deployed ');
-        if (index < 0) {
-            throw new Error('deploy verifier failed!');
-        }
-        // get contract address
-        const verifierAddress = forgescriptout.substring(index).split('\n')[0].split(' ')[2].trim();
+        // vk
+        const circuitPath = path.join(__dirname, '../target/process_shot.json');
+        const circuitJson = JSON.parse(readFileSync(circuitPath, 'utf8'));
+        const bytecode = circuitJson.bytecode;
+        const Backend = new UltraHonkBackend(bytecode, { threads: 1 }, { recursive: true });
+        const noir = new Noir(circuitJson);
+        vk = await Backend.getVerificationKey({ keccak: true });
 
 
-        const safeOnchainTime = 1;
-        const playerDecisionTime = 1;
-        const zkProofTime = 1;
-        const _ENV = {
-            DEPLOYER_PRIVATE_KEY: privateKeys[0],
-            VERIFIER: verifierAddress,
-            SAFEONCHAINTIME: '' + safeOnchainTime,
-            PLAYERDECISIONTIME: '' + playerDecisionTime,
-            ZKPROOFTIME: '' + zkProofTime
+
+        let cruiser = [0, 6, 12];
+        let destroyer = [14, 15];
+        let submarine = 21;
+        let salt = 7;
+        let expected_hash = '0x04df209ed0aad0968c3aa95d735485f04ed83fb29173287fda6716461da5815d';
+
+        let pub_input =
+            (BigInt(2) /* STATUS_SUNK */) +
+            (BigInt(21)/*打击位置 */ << BigInt(4)) +
+            (BigInt(0)/* be_bits_to_u64(grid_snapshot_bits */ << BigInt(12));
+        pub_input = pub_input + ((BigInt(21) << BigInt(48)) + (BigInt(21) << BigInt(56)));
+        // if i == 12 {
+        //     pub_input = pub_input + ((0 << 48) + (12 << 56))
+        // } else if i == 15 {
+        //     pub_input = pub_input + ((14 << 48) + (15 << 56))
+        // } else if i == 21 {
+        //     pub_input = pub_input + ((21 << 48) + (21 << 56))
+        // }
+
+        const inputMap: InputMap = {
+            cruiser: cruiser,
+            destroyer: destroyer,
+            submarine: submarine,
+            salt: salt,
+            expected_hash: expected_hash,
+            pub_input: pub_input.toString()
+        };
+        const { witness } = await noir.execute(inputMap);
+        proofData_inner = await Backend.generateProof(witness, {
+            keccak: true
+        });
+        const proofBytes = '0x' + Buffer.from(proofData_inner.proof).toString('hex');
+
+        const verify = await Backend.verifyProof(proofData_inner, {
+            keccak: true
+        })
+        if (verify === false) {
+            throw new Error('verifyProof failed');
         }
-        console.log(`DEPLOYER_PRIVATE_KEY=${privateKeys[0]} VERIFIER=${verifierAddress} SAFEONCHAINTIME=${safeOnchainTime} PLAYERDECISIONTIME=${playerDecisionTime} ZKPROOFTIME=${zkProofTime}`);
-        forgescriptout = shell.exec(
-            `forge script ./contract/script/ZKBattleship.s.sol:ZKBattleshipDeployer --rpc-url ${http_rpc} --broadcast -vvvv`,
-            {
-                env: {
-                    ...process.env,
-                    ..._ENV
-                },
-            }
-        ).stdout;
-        index = forgescriptout.indexOf('##Deployed ');
-        if (index < 0) {
-            throw new Error('deploy ZKBattleship failed!');
-        }
-        // get contract address
-        ZKBattleshipAddress = forgescriptout.substring(index).split('\n')[0].split(' ')[2].trim();
+
+        // Generate the key hash using the backend method
+        const artifacts = await Backend.generateRecursiveProofArtifacts(proofData_inner.proof, proofData_inner.publicInputs.length);
+        vkHash = artifacts.vkHash;
+        // proofAsFields = artifacts.proofAsFields;
+        vkAsFields = artifacts.vkAsFields;
+
+    }
+    const circuitPath = path.join(__dirname, '../target/recursive_process_shot.json');
+    const circuitJson = JSON.parse(readFileSync(circuitPath, 'utf8'));
+    const bytecode = circuitJson.bytecode;
+    const Backend = new UltraHonkBackend(bytecode, { threads: 4 }, { recursive: false });
+    const noir = new Noir(circuitJson);
+
+    // const inputMap: InputMap = {
+    //     data: [
+    //         {
+    //             _is_some: true,
+    //             _value: 2
+    //         },
+    //         {
+    //             _is_some: true,
+    //             _value: 8
+    //         }, {
+    //             _is_some: false,
+    //             _value: 3
+    //         }
+    //     ],
+    //     re: 10
+    // };
+
+    /*
+    verification_key: UltraHonkVerificationKey,
+    proof: UltraHonkZKProof,
+    key_hash: Field,
+    public_inputs: pub [Field; 2],
+    */
+
+
+    const _vkAsFields: string[] = [];
+    for (let i = 0; i < vk.length; i += 32) {
+        const chunk = vk.slice(i, i + 32);
+        _vkAsFields.push(uint8ArrayToHex(chunk));
     }
 
-    const ZKBattleshipABI = JSON.stringify(JSON.parse(readFileSync(path.join(__dirname, '../contract/out/ZKBattleship.sol/ZKBattleship.json'), 'utf8')).abi);
+    const _proofAsFields: string[] = [];
+    for (let i = 0; i < proofData_inner.proof.length; i += 32) {
+        const chunk = proofData_inner.proof.slice(i, i + 32);
+        _proofAsFields.push(uint8ArrayToHex(chunk));
+    }
+
+    let vkFr = bb.acirVkAsFieldsUltraHonk(vk);
+    let vkFields = vkFr.map(x => x.toString());
+
+    let proofFr = bb.acirProofAsFieldsUltraHonk(proofData_inner.proof);
+    let proofFields = proofFr.map(x => x.toString());
+
+    // const proof = reconstructProofWithPublicInputs(proofData);
+    // const proofAsFields = (await this.api.acirProofAsFieldsUltraHonk(proof)).slice(numOfPublicInputs);
 
 
-    const player1 = new Player(http_rpc, privateKeys[1], ZKBattleshipAddress, ZKBattleshipABI, path.join(__dirname, '../target/process_shot.json'), 'player1');
-    const player2 = new Player(http_rpc, privateKeys[2], ZKBattleshipAddress, ZKBattleshipABI, path.join(__dirname, '../target/process_shot.json'), 'player2');
+    const proof1 = reconstructProofWithPublicInputs(proofData_inner);
+    const proofAsFields1 = (await bb.acirProofAsFieldsUltraHonk(proof1)).slice(proofData_inner.publicInputs.length);
 
-    player1.run(false);
-    await player2.run(true);
+
+    const vkAsFields222 = await bb1.vkAsFields({ verificationKey: vk });
+    const vkAsFieldsReal = vkAsFields222.fields.map((field) => {
+        let fieldBigint = BigInt(0);
+        for (const byte of field) {
+            fieldBigint <<= BigInt(8);
+            fieldBigint += BigInt(byte);
+        }
+        return fieldBigint.toString();
+    });
+
+    let a1 = reconstructHonkProof(flattenFieldsAsArray(proofData_inner.publicInputs), proofData_inner.proof);
+    const inputMap: InputMap = {
+        verification_key: vkAsFields,
+        proof: a1.map(p => p.toString()),
+        key_hash: vkHash,
+        public_inputs: proofData_inner.publicInputs,
+    };
+    const { witness } = await noir.execute(inputMap);
+    const proofData: ProofData = await Backend.generateProof(witness, {
+        keccak: true,
+    });
+    const proofBytes = '0x' + Buffer.from(proofData.proof).toString('hex');
+
+    const verify = await Backend.verifyProof(proofData, {
+        keccak: true
+    })
+    if (verify === false) {
+        throw new Error('verifyProof failed');
+    }
+
+
 }
-
-function sleep(ms: number) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
-
 main();

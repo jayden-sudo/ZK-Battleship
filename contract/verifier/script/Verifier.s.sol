@@ -13,8 +13,8 @@ contract VerifierDeployer is Script {
 
     function run() public {
         vm.startBroadcast(privateKey);
-        address addr = address(new HonkVerifier{salt: bytes32(0)}());
+        address addr = address(new HonkVerifier{salt: bytes32(uint256(0))}());
         vm.stopBroadcast();
-        console.log("##Deployed", "ZKBattleship", addr);
+        console.log("##Deployed", "HonkVerifier", addr);
     }
 }

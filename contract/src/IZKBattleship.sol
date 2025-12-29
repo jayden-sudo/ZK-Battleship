@@ -69,6 +69,15 @@ struct ShotResult {
 }
 
 /**
+ * @notice
+ */
+struct DashBoard {
+    uint64 InProgress;
+    uint64 Completed;
+    uint64 Waiting;
+}
+
+/**
  * @notice Possible outcomes for a fired shot.
  */
 enum ShotStatus {
@@ -141,6 +150,20 @@ interface IZKBattleship {
     );
 
     /**
+     * @notice Emitted when a player times out.
+     * @param gameId The identifier of the game.
+     * @param timeoutPlayer The address of the player.
+     */
+    event PlayerTimeout(uint256 indexed gameId, address indexed timeoutPlayer);
+    
+    /**
+     * @notice Emitted when a player quits.
+     * @param gameId The identifier of the game.
+     * @param quitPlayer The address of the player.
+     */
+    event PlayerQuit(uint256 indexed gameId, address indexed quitPlayer);
+
+    /**
      * @notice Emitted when a game has been won.
      * @param gameId The identifier of the completed game.
      * @param winner The address of the player who won the game.
@@ -149,11 +172,13 @@ interface IZKBattleship {
 
     /**
      * @notice Emitted when a player sends a message to another player.
+     * @param gameId The identifier of the game the message is sent in.
      * @param sender The address of the message sender.
      * @param recipient The address of the message recipient.
      * @param message The content of the message.
      */
     event ChatMessage(
+        uint256 indexed gameId,
         address indexed sender,
         address indexed recipient,
         string message
@@ -285,8 +310,13 @@ interface IZKBattleship {
 
     /**
      * @notice Sends an on-chain message to another player.
+     * @param gameId The identifier of the game.
      * @param recipient The address of the player to receive the message.
      * @param message The text content of the message.
      */
-    function sendMessage(address recipient, string calldata message) external;
+    function sendMessage(
+        uint256 gameId,
+        address recipient,
+        string calldata message
+    ) external;
 }

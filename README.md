@@ -7,7 +7,7 @@ A decentralized, trustless Battleship game powered by Zero-Knowledge proofs. Thi
 The game leverages UltraHonk to allow players to play Battleship without revealing their ship placements to their opponent or a central server. The entire game state and logic are managed by a smart contract on an Ethereum-like blockchain.
 
 The core gameplay loop is as follows:
-1.  **Board Setup**: Each player places their ships on a 10x10 grid locally. A commitment to the board's configuration and a zero-knowledge proof of a valid setup (e.g., correct ship sizes and no overlapping ships) is submitted to the smart contract.
+1.  **Board Setup**: Each player places their ships on a 6x6 grid locally. A commitment to the board's configuration and a zero-knowledge proof of a valid setup (e.g., correct ship sizes and no overlapping ships) is submitted to the smart contract.
 2.  **Taking a Shot**: A player declares a coordinate they want to attack.
 3.  **Proof Generation**: The opponent, using their private board state and the shot coordinate, generates a ZK proof that details the outcome of the shot (i.e., whether it was a 'hit' or a 'miss', and if a ship was sunk). This proof is generated without revealing any information about the ship placements.
 4.  **On-Chain Verification**: The proof is submitted to the `ZKBattleship` smart contract. The contract's `Verifier` component validates the proof. If valid, the public game state is updated (e.g., marking a coordinate as a hit or miss).
