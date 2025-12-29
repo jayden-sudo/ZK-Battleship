@@ -10,3 +10,5 @@
 /broadcast
 /contract/verifier/broadcast
 js/onlinetest.ts
+js/player.ts
+js/localtest.ts
