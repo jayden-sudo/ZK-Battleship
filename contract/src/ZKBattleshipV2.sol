@@ -4,6 +4,7 @@ pragma solidity ^0.8.30;
 import {IZKBattleshipV2, UserBalance, Game, GameStatus, GameStatusType, NextTurnState, ShotResult, ShotStatus, DashBoard} from "./IZKBattleshipV2.sol";
 import {Bytes32LinkedList} from "./Bytes32LinkedList.sol";
 import {IVerifier} from "./IVerifier.sol";
+import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
 /**
  * @title ZKBattleship
@@ -13,6 +14,15 @@ import {IVerifier} from "./IVerifier.sol";
  */
 contract ZKBattleshipV2 is IZKBattleshipV2 {
     using Bytes32LinkedList for mapping(bytes32 => bytes32);
+
+    // =================================================================================================
+    // Constants
+    // =================================================================================================
+
+    /// @notice The number of hits required to win the game.
+    uint8 private constant HITS_TO_WIN = 6;
+    /// @notice The size of the game board (6x6 grid = 36 positions).
+    uint8 private constant BOARD_SIZE = 36;
 
     // =================================================================================================
     // State Variables
@@ -38,16 +48,16 @@ contract ZKBattleshipV2 is IZKBattleshipV2 {
     // =================================================================================================
 
     constructor(
+        IVerifier verifier,
         uint8 roundTimeLimit,
-        uint8 revealRandomnessLimit,
-        IVerifier verifier
+        uint8 revealRandomnessLimit
     ) {
         require(
-            roundTimeLimit > 10 && roundTimeLimit < 60,
+            roundTimeLimit > 9 && roundTimeLimit < 61,
             "Invalid time limit"
         );
         require(
-            revealRandomnessLimit > 5 && revealRandomnessLimit < 15,
+            revealRandomnessLimit > 4 && revealRandomnessLimit < 16,
             "Invalid time limit"
         );
         ROUND_TIME_LIMIT = roundTimeLimit;
@@ -64,6 +74,24 @@ contract ZKBattleshipV2 is IZKBattleshipV2 {
         uint256 limit
     ) external view override returns (bytes32[] memory) {
         return waitingGames.list(from, limit);
+    }
+
+    function listWaitingGameData(
+        bytes32 from,
+        uint256 limit
+    )
+        external
+        view
+        override
+        returns (bytes32[] memory gameIds, Game[] memory gameData)
+    {
+        gameIds = waitingGames.list(from, limit);
+        gameData = new Game[](gameIds.length);
+        for (uint256 i = 0; i < gameIds.length; i++) {
+            if (gameIds[i] != bytes32(0)) {
+                gameData[i] = games[gameIds[i]];
+            }
+        }
     }
 
     function getUserGameId(
@@ -108,7 +136,7 @@ contract ZKBattleshipV2 is IZKBattleshipV2 {
         bytes32 boardCommitment,
         uint256 stake,
         address sessionKey,
-        bytes calldata p2pMessagePublicKey
+        string calldata p2pUID
     ) external payable override returns (bytes32 gameId) {
         if (msg.value > 0) {
             _deposit(msg.value, msg.sender);
@@ -135,8 +163,7 @@ contract ZKBattleshipV2 is IZKBattleshipV2 {
                 randomnessCommitment,
                 boardCommitment,
                 stake,
-                sessionKey,
-                p2pMessagePublicKey
+                sessionKey
             )
         );
 
@@ -151,7 +178,6 @@ contract ZKBattleshipV2 is IZKBattleshipV2 {
             creator: msg.sender,
             joiner: address(0),
             creatorRandomnessCommitment: randomnessCommitment,
-            joinerRandomnessSalt: bytes32(0),
             creatorBoardCommitment: boardCommitment,
             joinerBoardCommitment: bytes32(0),
             previousGameStatusHash: bytes32(0),
@@ -159,7 +185,7 @@ contract ZKBattleshipV2 is IZKBattleshipV2 {
             creatorSessionKey: sessionKey,
             joinerSessionKey: address(0),
             stake: stake,
-            lastActiveTimestamp: 0,
+            lastActiveTimestamp: uint64(block.timestamp),
             creatorGameBoard: 0,
             joinerGameBoard: 0,
             nextTurnState: NextTurnState.Join,
@@ -169,32 +195,26 @@ contract ZKBattleshipV2 is IZKBattleshipV2 {
         games[gameId] = newGame;
         waitingGames.add(gameId);
 
-        emit GameCreated(
-            gameId,
-            msg.sender,
-            stake,
-            sessionKey,
-            p2pMessagePublicKey
-        );
+        emit GameCreated(gameId, msg.sender, stake, sessionKey, p2pUID);
     }
 
     function joinGame(
         bytes32 gameId,
         bytes32 boardCommitment,
-        bytes32 randomnessSalt,
         address sessionKey,
-        bytes calldata p2pMessagePublicKey,
-        bytes calldata encryptedP2PUID
+        uint256 endTime,
+        bytes calldata creatorSignature
     ) external payable override {
         if (msg.value > 0) {
             _deposit(msg.value, msg.sender);
         }
 
         require(
-            userGameIds[msg.sender] == 0,
+            userGameIds[msg.sender] == bytes32(0),
             "ZKBattleship: User is already in a game"
         );
         require(sessionKey != address(0), "ZKBattleship: Invalid session key");
+        require(endTime < block.timestamp);
         userGameIds[msg.sender] = gameId;
 
         Game storage game = games[gameId];
@@ -212,23 +232,26 @@ contract ZKBattleshipV2 is IZKBattleshipV2 {
             sessionKey != game.creatorSessionKey,
             "ZKBattleship: Invalid session key"
         );
+
+        bytes32 _hash = keccak256(
+            abi.encodePacked(gameId, endTime, msg.sender)
+        );
+        address recovered = recover(_hash, creatorSignature);
+        require(
+            recovered == game.creatorSessionKey,
+            "ZKBattleship: Invalid creator signature"
+        );
+
         balances[msg.sender].lockedBalance += game.stake;
         waitingGames.remove(gameId);
 
         game.joiner = msg.sender;
-        game.joinerRandomnessSalt = randomnessSalt;
         game.joinerBoardCommitment = boardCommitment;
         game.joinerSessionKey = sessionKey;
         game.lastActiveTimestamp = uint64(block.timestamp);
         game.nextTurnState = NextTurnState.RevealRandomness;
 
-        emit GameJoined(
-            gameId,
-            msg.sender,
-            sessionKey,
-            p2pMessagePublicKey,
-            encryptedP2PUID
-        );
+        emit GameJoined(gameId, msg.sender, sessionKey);
     }
 
     function revealRandomness(
@@ -251,7 +274,7 @@ contract ZKBattleshipV2 is IZKBattleshipV2 {
         );
         // Determine initiative by combining both players' randomness.
         bytes32 combinedRandomness = keccak256(
-            abi.encode(randomnessSalt, game.joinerRandomnessSalt)
+            abi.encode(randomnessSalt, game.joinerBoardCommitment)
         );
         bool creatorFirst = uint256(combinedRandomness) % 2 == 1;
 
@@ -266,33 +289,29 @@ contract ZKBattleshipV2 is IZKBattleshipV2 {
         );
     }
 
-    function updateP2PUID(bytes calldata encryptedP2PUID) external override {
-        emit P2PUIDUpdated(encryptedP2PUID);
-    }
-
     function closeIdleGame(bytes32 gameId) external override {
         Game storage game = games[gameId];
         require(
             game.nextTurnState == NextTurnState.Join,
             "ZKBattleship: Game state error"
         );
-
-        game.nextTurnState = NextTurnState.Completed;
-
+        game.nextTurnState = NextTurnState.Blank;
         require(
             msg.sender == game.creator,
             "ZKBattleship: Only creator can leave at this stage"
         );
         balances[game.creator].lockedBalance -= game.stake;
+        waitingGames.remove(gameId);
+        userGameIds[game.creator] = bytes32(0);
 
         emit GameClosed(gameId);
     }
 
     function gameEnded(bytes32 gameId, address winner) internal {
         Game storage game = games[gameId];
-        userGameIds[game.creator] = 0;
+        userGameIds[game.creator] = bytes32(0);
         if (game.joiner != address(0)) {
-            userGameIds[game.joiner] = 0;
+            userGameIds[game.joiner] = bytes32(0);
         }
 
         address loser = game.creator == winner ? game.joiner : game.creator;
@@ -302,8 +321,7 @@ contract ZKBattleshipV2 is IZKBattleshipV2 {
         balances[loser].totalBalance -= game.stake;
 
         // Clean up game storage
-        delete games[gameId];
-
+        // delete games[gameId];
         games[gameId].nextTurnState = NextTurnState.Completed;
 
         emit GameEnded(gameId, winner);
@@ -351,9 +369,15 @@ contract ZKBattleshipV2 is IZKBattleshipV2 {
     function recover(
         bytes32 _hash,
         bytes calldata _signature
-    ) internal view returns (address recovered) {
-        // #TODO
-        return address(0);
+    ) internal pure returns (address) {
+        (address recoveredAddr, ECDSA.RecoverError error, ) = ECDSA.tryRecover(
+            _hash,
+            _signature
+        );
+        if (error != ECDSA.RecoverError.NoError) {
+            revert("ZKBattleship: Invalid signature");
+        }
+        return recoveredAddr;
     }
 
     function surrender(
@@ -366,6 +390,17 @@ contract ZKBattleshipV2 is IZKBattleshipV2 {
                 game.nextTurnState < NextTurnState.Completed,
             "ZKBattleship: Game state error"
         );
+        if (sessionKeySignature.length == 0) {
+            if (msg.sender == game.creator) {
+                gameEnded(gameId, game.joiner);
+                return;
+            } else if (msg.sender == game.joiner) {
+                gameEnded(gameId, game.creator);
+                return;
+            } else {
+                revert("ZKBattleship: Invalid sender");
+            }
+        }
         bytes32 _hash = keccak256(abi.encodePacked(gameId, "I surrender"));
         address recovered = recover(_hash, sessionKeySignature);
         if (recovered == game.creatorSessionKey) {
@@ -395,26 +430,86 @@ contract ZKBattleshipV2 is IZKBattleshipV2 {
         } else {
             revert("ZKBattleship: Invalid sender");
         }
-        bytes32 prevGameStatusHash = game.previousGameStatusHash;
+        /*
+            To prevent cheating, the following conditions must be satisfied:
+                1.	If the last item in the gameStatus array is the opponent’s status (Shot or Report), and it contains the opponent’s signature, the submission passes.
+                2.	If the last item in the gameStatus array is our Report, the submission fails.
+                    (A zk proof must be submitted via reportShotResult().)
+                3.	If the last item in the gameStatus array is our Shot and the length of gameStatus is 1, the submission passes.
+                    (If cheating occurs, the opponent may submit a cheating report via reportCheating().)
+                4.	If the last item in the gameStatus array is our Shot and the length of gameStatus is greater than 1, the submission fails.
+                    (A zk proof must be submitted via reportShotResult() before submitting gameStatus.)
+            TODO:
+                Verifying only the last signature is sufficient to guarantee security 
+                (if the verification of the final signature succeeds, it implies that all preceding messages have been authenticated by the signer)
+         
+         */
+        bytes32 prevGameStatusHash; // = game.previousGameStatusHash;
         bytes32 gameStatusHash = game.currentGameStatusHash;
         uint8 fireAtPosition = game.fireAtPosition;
-        for (uint256 i; i < gameStatus.length; i++) {
+        uint64 creatorGameBoard = game.creatorGameBoard;
+        uint64 joinerGameBoard = game.joinerGameBoard;
+        for (uint256 i = 0; i < gameStatus.length; i++) {
             GameStatus calldata item = gameStatus[i];
+            bool lastItem = i == (gameStatus.length - 1);
             if (item.gameStatusType == GameStatusType.Shot) {
                 fireAtPosition = item.value;
                 require(fireAtPosition < 64);
+                prevGameStatusHash = gameStatusHash;
+                gameStatusHash = keccak256(
+                    abi.encodePacked(gameStatusHash, fireAtPosition)
+                );
                 if (nextTurnState == NextTurnState.CreatorFire) {
-                    if(senderIsCreator){
+                    require(
+                        (joinerGameBoard >>
+                            uint64(BOARD_SIZE - 1 - fireAtPosition)) &
+                            1 ==
+                            0,
+                        "ZKBattleship: Position already shot"
+                    );
 
-                    }else{
-
+                    if (senderIsCreator) {
+                        if (lastItem) {
+                            require(
+                                gameStatus.length == 1,
+                                "ZKBattleship: Shot must be submitted alone"
+                            );
+                        }
+                    } else {
+                        address recovered = recover(
+                            gameStatusHash,
+                            item.sessionKeySignature
+                        );
+                        require(
+                            recovered == game.creatorSessionKey,
+                            "ZKBattleship: Invalid opponent signature"
+                        );
                     }
                     nextTurnState = NextTurnState.JoinerReport;
                 } else if (nextTurnState == NextTurnState.JoinerFire) {
-                    if(senderIsCreator){
-
-                    }else{
-                        
+                    require(
+                        (creatorGameBoard >>
+                            uint64(BOARD_SIZE - 1 - fireAtPosition)) &
+                            1 ==
+                            0,
+                        "ZKBattleship: Position already shot"
+                    );
+                    if (senderIsCreator) {
+                        address recovered = recover(
+                            gameStatusHash,
+                            item.sessionKeySignature
+                        );
+                        require(
+                            recovered == game.joinerSessionKey,
+                            "ZKBattleship: Invalid opponent signature"
+                        );
+                    } else {
+                        if (lastItem) {
+                            require(
+                                gameStatus.length == 1,
+                                "ZKBattleship: Shot must be submitted alone"
+                            );
+                        }
                     }
                     nextTurnState = NextTurnState.CreatorReport;
                 } else {
@@ -422,35 +517,89 @@ contract ZKBattleshipV2 is IZKBattleshipV2 {
                 }
             } else {
                 require(item.value < 3);
+                prevGameStatusHash = gameStatusHash;
+                gameStatusHash = keccak256(
+                    abi.encodePacked(gameStatusHash, item.value)
+                );
                 ShotStatus shotStatus = ShotStatus(item.value);
                 if (nextTurnState == NextTurnState.CreatorReport) {
-                    if(senderIsCreator){
-
-                    }else{
-                        
+                    if (senderIsCreator) {
+                        if (lastItem) {
+                            require(
+                                false,
+                                "ZKBattleship: Use reportShotResult for own report"
+                            );
+                        }
+                    } else {
+                        address recovered = recover(
+                            gameStatusHash,
+                            item.sessionKeySignature
+                        );
+                        require(
+                            recovered == game.creatorSessionKey,
+                            "ZKBattleship: Invalid opponent signature"
+                        );
                     }
                     nextTurnState = NextTurnState.CreatorFire;
                 } else if (nextTurnState == NextTurnState.JoinerReport) {
-                    if(senderIsCreator){
-
-                    }else{
-                        
+                    if (senderIsCreator) {
+                        address recovered = recover(
+                            gameStatusHash,
+                            item.sessionKeySignature
+                        );
+                        require(
+                            recovered == game.joinerSessionKey,
+                            "ZKBattleship: Invalid opponent signature"
+                        );
+                    } else {
+                        if (lastItem) {
+                            require(
+                                false,
+                                "ZKBattleship: Use reportShotResult for own report"
+                            );
+                        }
                     }
                     nextTurnState = NextTurnState.JoinerFire;
                 } else {
                     revert("ZKBattleship: Game state error");
                 }
-                if(i==(gameStatus.length-1)){
-                    // Check for winner: 6 total hits are required to win.
 
+                if (
+                    shotStatus == ShotStatus.Sunk ||
+                    shotStatus == ShotStatus.Hit
+                ) {
+                    // Check for winner: HITS_TO_WIN total hits are required to win.
+                    if (nextTurnState == NextTurnState.CreatorFire) {
+                        creatorGameBoard =
+                            creatorGameBoard |
+                            (uint64(1) <<
+                                uint64(BOARD_SIZE - 1 - fireAtPosition));
+                        if (countSetBits(creatorGameBoard) >= HITS_TO_WIN) {
+                            gameEnded(gameId, game.joiner);
+                            return;
+                        }
+                    } else {
+                        joinerGameBoard =
+                            joinerGameBoard |
+                            (uint64(1) <<
+                                uint64(BOARD_SIZE - 1 - fireAtPosition));
+                        if (countSetBits(joinerGameBoard) >= HITS_TO_WIN) {
+                            gameEnded(gameId, game.creator);
+                            return;
+                        }
+                    }
                 }
             }
         }
+        game.creatorGameBoard = creatorGameBoard;
+        game.joinerGameBoard = joinerGameBoard;
         game.fireAtPosition = fireAtPosition;
         game.previousGameStatusHash = prevGameStatusHash;
         game.currentGameStatusHash = gameStatusHash;
         game.nextTurnState = nextTurnState;
         game.lastActiveTimestamp = uint64(block.timestamp);
+
+        emit GameStatusSubmitted(gameId, msg.sender, gameStatus);
     }
 
     function reportCheating(
@@ -493,13 +642,13 @@ contract ZKBattleshipV2 is IZKBattleshipV2 {
     }
 
     /**
-     * @notice Counts the number of set bits (1s) in a uint64.
+     * @notice Counts the number of set bits (1s) in a uint64, used for counting hits on the board.
      * @dev Implements a parallel bit counting algorithm (popcount).
      *      See: https://www.chessprogramming.org/Population_Count
      * @param gameBoard The uint64 value to count bits in.
      * @return The number of set bits.
      */
-    function hitedObjectCount(uint64 gameBoard) internal pure returns (uint8) {
+    function countSetBits(uint64 gameBoard) internal pure returns (uint8) {
         gameBoard = gameBoard - ((gameBoard >> 1) & 0x5555555555555555);
         gameBoard =
             (gameBoard & 0x3333333333333333) +
@@ -531,6 +680,14 @@ contract ZKBattleshipV2 is IZKBattleshipV2 {
             revert("ZKBattleship: Game state error");
         }
         game.lastActiveTimestamp = uint64(block.timestamp);
+
+        game.previousGameStatusHash = game.currentGameStatusHash;
+        game.currentGameStatusHash = keccak256(
+            abi.encodePacked(
+                game.currentGameStatusHash,
+                uint8(shotResult.shotStatus)
+            )
+        );
         require(
             zkProofVerify(
                 boardCommitment,
@@ -548,10 +705,10 @@ contract ZKBattleshipV2 is IZKBattleshipV2 {
             shotResult.shotStatus == ShotStatus.Sunk
         ) {
             uint64 newGameBoard = gameBoard |
-                (uint64(1) << uint64(36 - 1 - game.fireAtPosition));
+                (uint64(1) << uint64(BOARD_SIZE - 1 - game.fireAtPosition));
 
-            // Check for winner: 6 total hits are required to win.
-            if (hitedObjectCount(newGameBoard) >= 6) {
+            // Check for winner: HITS_TO_WIN total hits are required to win.
+            if (countSetBits(newGameBoard) >= HITS_TO_WIN) {
                 address winner;
                 if (game.nextTurnState == NextTurnState.JoinerFire) {
                     // Joiner was reporting, creator shot
@@ -561,6 +718,7 @@ contract ZKBattleshipV2 is IZKBattleshipV2 {
                     winner = game.joiner;
                 }
                 gameEnded(gameId, winner);
+                return;
             } else {
                 // Update the defender's board with the new hit
                 if (game.nextTurnState == NextTurnState.JoinerFire) {
@@ -570,11 +728,6 @@ contract ZKBattleshipV2 is IZKBattleshipV2 {
                     // Creator was reporting
                     game.creatorGameBoard = newGameBoard;
                 }
-                bytes32 gameStatusHash = game.currentGameStatusHash;
-                // #TODO
-
-                game.previousGameStatusHash = game.currentGameStatusHash;
-                game.currentGameStatusHash = gameStatusHash;
             }
         }
 
@@ -584,6 +737,36 @@ contract ZKBattleshipV2 is IZKBattleshipV2 {
             game.fireAtPosition,
             shotResult
         );
+    }
+
+    /**
+     * @dev Packs game state data into a single bytes32 value for ZK proof verification.
+     * The layout is as follows (from LSB to MSB):
+     * - shotStatus (4 bits)
+     * - firePosition (8 bits)
+     * - gameBoard (36 bits)
+     * - sunkHeadPosition (8 bits)
+     * - sunkEndPosition (8 bits)
+     */
+    function packPublicInputs(
+        uint64 gameBoard,
+        uint8 firePosition,
+        ShotResult memory shotResult
+    ) internal pure returns (bytes32) {
+        // Bits layout:
+        // [0:3]   - shotStatus
+        // [4:11]  - firePosition
+        // [12:47] - gameBoard (36 bits)
+        // [48:55] - sunkHeadPosition
+        // [56:63] - sunkEndPosition
+        return
+            bytes32(
+                (uint256(shotResult.shotStatus)) |
+                    (uint256(firePosition) << 4) |
+                    (uint256(gameBoard) << 12) |
+                    (uint256(shotResult.sunkHeadPosition) << 48) |
+                    (uint256(shotResult.sunkEndPosition) << 56)
+            );
     }
 
     /**
@@ -604,14 +787,7 @@ contract ZKBattleshipV2 is IZKBattleshipV2 {
     ) internal returns (bool) {
         bytes32[] memory publicInputs = new bytes32[](2);
         publicInputs[0] = boardCommitment;
-        // Pack game state data into a single bytes32 public input.
-        publicInputs[1] = bytes32(
-            (uint256(shotResult.sunkHeadPosition) << 48) +
-                (uint256(shotResult.sunkEndPosition) << 56) +
-                (uint256(gameBoard) << 12) +
-                (uint256(firePosition) << 4) +
-                uint256(shotResult.shotStatus)
-        );
+        publicInputs[1] = packPublicInputs(gameBoard, firePosition, shotResult);
         return VERIFIER.verify(proof, publicInputs);
     }
 }

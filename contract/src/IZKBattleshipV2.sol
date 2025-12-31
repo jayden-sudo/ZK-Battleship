@@ -37,6 +37,10 @@ enum NextTurnState {
  * @param joinerRandomnessSalt The joiner's revealed salt for determining initiative.
  * @param creatorBoardCommitment The creator's committed hash of their board layout.
  * @param joinerBoardCommitment The joiner's committed hash of their board layout.
+ * @param previousGameStatusHash The hash of the previous game status.
+ * @param currentGameStatusHash The hash of the current game status.
+ * @param creatorSessionKey The session key for the creator.
+ * @param joinerSessionKey The session key for the joiner.
  * @param stake The amount of ETH (in wei) staked by each player.
  * @param lastActiveTimestamp The timestamp of the last action taken in the game.
  * @param creatorGameBoard A bitmask representing the state of the creator's game board.
@@ -48,7 +52,6 @@ struct Game {
     address creator;
     address joiner;
     bytes32 creatorRandomnessCommitment;
-    bytes32 joinerRandomnessSalt;
     bytes32 creatorBoardCommitment;
     bytes32 joinerBoardCommitment;
     bytes32 previousGameStatusHash;
@@ -56,15 +59,18 @@ struct Game {
     address creatorSessionKey;
     address joinerSessionKey;
     uint256 stake;
-    uint64 lastActiveTimestamp;
     uint64 creatorGameBoard;
     uint64 joinerGameBoard;
+    uint64 lastActiveTimestamp;
     NextTurnState nextTurnState;
     uint8 fireAtPosition;
 }
 
 /**
- * @notice
+ * @notice Represents the outcome of a shot.
+ * @param shotStatus The status of the shot (Miss, Hit, or Sunk).
+ * @param sunkHeadPosition The head position of the ship if it was sunk.
+ * @param sunkEndPosition The end position of the ship if it was sunk.
  */
 struct ShotResult {
     ShotStatus shotStatus;
@@ -73,7 +79,10 @@ struct ShotResult {
 }
 
 /**
- * @notice
+ * @notice A dashboard of game statistics.
+ * @param InProgress The number of games in progress.
+ * @param Completed The number of completed games.
+ * @param Waiting The number of games waiting for a joiner.
  */
 struct DashBoard {
     uint64 InProgress;
@@ -90,22 +99,27 @@ enum ShotStatus {
     Sunk // 2: The shot hit the final part of a ship, sinking it.
 }
 
+/**
+ * @notice The type of game status update.
+ */
 enum GameStatusType {
-    Shot, // 0
-    ShotResult // 1
+    Shot, // 0: A player fires a shot.
+    Report // 1: A player reports the result of a shot.
 }
 
+/**
+ * @notice Represents a single status update in the game, signed by a session key.
+ * @param gameStatusType The type of status update (Shot or Report).
+ * @param value If the type is Shot, this is the target position (0-63).
+ *              If the type is Report, this is the ShotStatus (Miss, Hit, Sunk).
+ * @param sessionKeySignature A signature from the player's session key,
+ *                            verifying the authenticity of the game status update.
+ *                            For a Shot, it's `attacker.sign(gameStatusHash || value)`.
+ *                            For a Report, it's `defender.sign(gameStatusHash || value)`.
+ */
 struct GameStatus {
     GameStatusType gameStatusType;
-    /**
-     * if gameStatusType == Shot { value ∈ [0, 63] }
-     * if gameStatusType == ShotResult { value ∈ {ShotStatus} }
-     */
     uint8 value;
-    /**
-     * if gameStatusType == Shot { sessionKeySignature = attacker.sign(gameStatusHash  || value) }
-     * if gameStatusType == ShotResult { sessionKeySignature = defender.sign(gameStatusHash || value) }
-     */
     bytes sessionKeySignature;
 }
 
@@ -125,30 +139,33 @@ interface IZKBattleshipV2 {
      * @param gameId The unique identifier for the new game.
      * @param creator The address of the player who created the game.
      * @param stake The amount of ETH (in wei) staked by the creator.
+     * @param sessionKey The session key registered by the creator for this game.
+     * @param p2pUID The [encrypted(Not yet implemented)] peer-to-peer user ID.
      */
     event GameCreated(
         bytes32 indexed gameId,
         address indexed creator,
         uint256 stake,
         address sessionKey,
-        bytes p2pMessagePublicKey
+        string p2pUID
     );
 
     /**
      * @notice Emitted when a player joins an existing game.
      * @param gameId The identifier of the game being joined.
      * @param joiner The address of the player who joined.
-     */
+     * @param sessionKey The session key registered by the joiner for this game.
+     * */
     event GameJoined(
         bytes32 indexed gameId,
         address indexed joiner,
-        address sessionKey,
-        bytes p2pMessagePublicKey,
-        bytes encryptedP2PUID
+        address sessionKey
     );
 
-    event P2PUIDUpdated(bytes encryptedP2PUID);
-
+    /**
+     * @notice Emitted when an idle game is closed.
+     * @param gameId The identifier of the closed game.
+     */
     event GameClosed(bytes32 indexed gameId);
 
     /**
@@ -157,6 +174,17 @@ interface IZKBattleshipV2 {
      * @param initiativePlayer The address of the player who won the initiative and will fire first.
      */
     event RandomnessRevealed(bytes32 indexed gameId, address initiativePlayer);
+
+    /**
+     * @notice Emitted when a game status is submitted.
+     * @param gameId The identifier of the game.
+     * @param sender The address of the player who submitted the status.
+     */
+    event GameStatusSubmitted(
+        bytes32 indexed gameId,
+        address indexed sender,
+        GameStatus[] gameStatus
+    );
 
     /**
      * @notice Emitted when a defender reports the result of a shot, backed by a ZK proof.
@@ -195,9 +223,19 @@ interface IZKBattleshipV2 {
     ) external view returns (bytes32[] memory);
 
     /**
+     * @notice Lists the full game data for all games currently waiting for a joiner.
+     * @param from The starting gameId for pagination.
+     * @param limit The maximum number of game data objects to return.
+     */
+    function listWaitingGameData(
+        bytes32 from,
+        uint256 limit
+    ) external view returns (bytes32[] memory gameIds, Game[] memory gameData);
+
+    /**
      * @notice Retrieves the ID of the game a user is currently participating in.
      * @param user The address of the player.
-     * @return gameId The ID of the active game, or 0 if the user is not in a game.
+     * @return gameId The ID of the active game, or zero if the user is not in a game.
      */
     function getUserGameId(address user) external view returns (bytes32 gameId);
 
@@ -230,30 +268,36 @@ interface IZKBattleshipV2 {
     /**
      * @notice Creates a new game and puts it in a waiting state.
      * @dev Locks the creator's stake and commits to their board layout and randomness.
+     * @param randomnessCommitment A commitment to the creator's randomness salt.
      * @param boardCommitment A commitment (e.g., hash or Merkle root) of the board layout.
      * @param stake The amount of ETH (in wei) to stake on the game.
+     * @param sessionKey A session key for signing off-chain game status updates.
+     * @param p2pUID The [encrypted(Not yet implemented)] peer-to-peer user ID.
+     * @return gameId The unique identifier for the new game.
      */
     function createGame(
         bytes32 randomnessCommitment,
         bytes32 boardCommitment,
         uint256 stake,
         address sessionKey,
-        bytes calldata p2pMessagePublicKey
-    ) external payable returns (bytes32 gameId /* hash(msg.sender || args) */);
+        string calldata p2pUID
+    ) external payable returns (bytes32 gameId);
 
     /**
      * @notice Joins an existing game created by another player.
      * @dev Requires matching the creator's stake and committing to a board layout and randomness.
      * @param gameId The identifier of the game to join.
      * @param boardCommitment A commitment to the joiner's board layout.
+     * @param sessionKey A session key for signing off-chain game status updates.
+     * @param endTime end time
+     * @param creatorSignature The signature from the creator's session key(Via P2P,).
      */
     function joinGame(
         bytes32 gameId,
         bytes32 boardCommitment,
-        bytes32 randomnessSalt,
         address sessionKey,
-        bytes calldata p2pMessagePublicKey,
-        bytes calldata encryptedP2PUID
+        uint256 endTime,
+        bytes calldata creatorSignature
     ) external payable;
 
     /**
@@ -264,22 +308,47 @@ interface IZKBattleshipV2 {
      */
     function revealRandomness(bytes32 gameId, bytes32 randomnessSalt) external;
 
-    function updateP2PUID(bytes calldata encryptedP2PUID) external;
-
+    /**
+     * @notice Closes a game that has been idle for too long.
+     * @dev Allows anyone to close an inactive game and potentially claim a reward.
+     * @param gameId The identifier of the idle game.
+     */
     function closeIdleGame(bytes32 gameId) external;
 
+    /**
+     * @notice Allows a player to claim victory if their opponent has left or is unresponsive.
+     * @param gameId The identifier of the game.
+     */
     function opponentLeave(bytes32 gameId) external;
 
+    /**
+     * @notice Allows a player to surrender the game.
+     * @param gameId The identifier of the game.
+     * @param sessionKeySignature A signature from the player's session key to confirm the surrender.
+     */
     function surrender(
         bytes32 gameId,
         bytes calldata sessionKeySignature
     ) external;
 
+    /**
+     * @notice Submits a series of game status updates for off-chain progression.
+     * @dev These statuses are signed by session keys and allow players to update the game state
+     *      without requiring a transaction for every move.
+     * @param gameId The identifier of the game.
+     * @param gameStatus An array of signed game status updates.
+     */
     function submitGameStatus(
         bytes32 gameId,
         GameStatus[] calldata gameStatus
     ) external;
 
+    /**
+     * @notice Reports that an opponent has cheated.
+     * @dev This function is used to challenge an invalid game state.
+     * @param gameId The identifier of the game.
+     * @param gameStatus The game status being challenged as fraudulent.
+     */
     function reportCheating(
         bytes32 gameId,
         GameStatus calldata gameStatus
