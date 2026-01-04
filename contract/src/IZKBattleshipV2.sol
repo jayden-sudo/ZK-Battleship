@@ -109,7 +109,7 @@ enum GameStatusType {
 
 /**
  * @notice Represents a single status update in the game, signed by a session key.
- * @param gameStatusType The type of status update (Shot or Report).
+ * @param //gameStatusType The type of status update (Shot or Report).
  * @param value If the type is Shot, this is the target position (0-63).
  *              If the type is Report, this is the ShotStatus (Miss, Hit, Sunk).
  * @param sessionKeySignature A signature from the player's session key,
@@ -118,7 +118,7 @@ enum GameStatusType {
  *                            For a Report, it's `defender.sign(gameStatusHash || value)`.
  */
 struct GameStatus {
-    GameStatusType gameStatusType;
+    // GameStatusType gameStatusType;
     uint8 value;
     bytes sessionKeySignature;
 }
@@ -176,14 +176,16 @@ interface IZKBattleshipV2 {
     event RandomnessRevealed(bytes32 indexed gameId, address initiativePlayer);
 
     /**
-     * @notice Emitted when a game status is submitted.
+     * @notice Emitted when a player fires a shot.
      * @param gameId The identifier of the game.
-     * @param sender The address of the player who submitted the status.
+     * @param attacker The address of the player who fired the shot.
+     * @param firePosition The board position (0-63) targeted by the shot.
      */
-    event GameStatusSubmitted(
+    event ShotFired(
         bytes32 indexed gameId,
-        address indexed sender,
-        GameStatus[] gameStatus
+        address indexed attacker,
+        uint8 firePosition,
+        bytes32 gameStatusHash
     );
 
     /**
@@ -193,11 +195,12 @@ interface IZKBattleshipV2 {
      * @param firePosition The board position (0-63) to target.
      * @param result The outcome of the shot (Miss, Hit, or Sunk).
      */
-    event ShotResultReported(
+    event ResultReported(
         bytes32 indexed gameId,
         address indexed defender,
         uint8 firePosition,
-        ShotResult result
+        ShotResult result,
+        bytes32 gameStatusHash
     );
 
     /**

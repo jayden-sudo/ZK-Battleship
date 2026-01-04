@@ -452,13 +452,17 @@ contract ZKBattleshipV2 is IZKBattleshipV2 {
         for (uint256 i = 0; i < gameStatus.length; i++) {
             GameStatus calldata item = gameStatus[i];
             bool lastItem = i == (gameStatus.length - 1);
-            if (item.gameStatusType == GameStatusType.Shot) {
+            if (
+                nextTurnState == NextTurnState.CreatorFire ||
+                nextTurnState == NextTurnState.JoinerFire
+            ) {
                 fireAtPosition = item.value;
                 require(fireAtPosition < 64);
                 prevGameStatusHash = gameStatusHash;
                 gameStatusHash = keccak256(
                     abi.encodePacked(gameStatusHash, fireAtPosition)
                 );
+                address attacker;
                 if (nextTurnState == NextTurnState.CreatorFire) {
                     require(
                         (joinerGameBoard >>
@@ -486,7 +490,8 @@ contract ZKBattleshipV2 is IZKBattleshipV2 {
                         );
                     }
                     nextTurnState = NextTurnState.JoinerReport;
-                } else if (nextTurnState == NextTurnState.JoinerFire) {
+                    attacker = game.creator;
+                } else {
                     require(
                         (creatorGameBoard >>
                             uint64(BOARD_SIZE - 1 - fireAtPosition)) &
@@ -512,16 +517,25 @@ contract ZKBattleshipV2 is IZKBattleshipV2 {
                         }
                     }
                     nextTurnState = NextTurnState.CreatorReport;
-                } else {
-                    revert("ZKBattleship: Game state error");
+                    attacker = game.joiner;
                 }
-            } else {
-                require(item.value < 3);
+                emit ShotFired(
+                    gameId,
+                    attacker,
+                    fireAtPosition,
+                    gameStatusHash
+                );
+            } else if (
+                nextTurnState == NextTurnState.CreatorReport ||
+                nextTurnState == NextTurnState.JoinerReport
+            ) {
+                require(item.value <= uint8(ShotStatus.Sunk));
                 prevGameStatusHash = gameStatusHash;
                 gameStatusHash = keccak256(
                     abi.encodePacked(gameStatusHash, item.value)
                 );
                 ShotStatus shotStatus = ShotStatus(item.value);
+                address defender;
                 if (nextTurnState == NextTurnState.CreatorReport) {
                     if (senderIsCreator) {
                         if (lastItem) {
@@ -541,7 +555,8 @@ contract ZKBattleshipV2 is IZKBattleshipV2 {
                         );
                     }
                     nextTurnState = NextTurnState.CreatorFire;
-                } else if (nextTurnState == NextTurnState.JoinerReport) {
+                    defender = game.creator;
+                } else {
                     if (senderIsCreator) {
                         address recovered = recover(
                             gameStatusHash,
@@ -560,14 +575,18 @@ contract ZKBattleshipV2 is IZKBattleshipV2 {
                         }
                     }
                     nextTurnState = NextTurnState.JoinerFire;
-                } else {
-                    revert("ZKBattleship: Game state error");
+                    defender = game.joiner;
                 }
 
-                if (
-                    shotStatus == ShotStatus.Sunk ||
-                    shotStatus == ShotStatus.Hit
-                ) {
+                emit ResultReported(
+                    gameId,
+                    defender,
+                    fireAtPosition,
+                    ShotResult(shotStatus, 0, 0),
+                    gameStatusHash
+                );
+
+                if (shotStatus != ShotStatus.Miss) {
                     // Check for winner: HITS_TO_WIN total hits are required to win.
                     if (nextTurnState == NextTurnState.CreatorFire) {
                         creatorGameBoard =
@@ -589,6 +608,8 @@ contract ZKBattleshipV2 is IZKBattleshipV2 {
                         }
                     }
                 }
+            } else {
+                revert("ZKBattleship: Invalid game status");
             }
         }
         game.creatorGameBoard = creatorGameBoard;
@@ -598,18 +619,12 @@ contract ZKBattleshipV2 is IZKBattleshipV2 {
         game.currentGameStatusHash = gameStatusHash;
         game.nextTurnState = nextTurnState;
         game.lastActiveTimestamp = uint64(block.timestamp);
-
-        emit GameStatusSubmitted(gameId, msg.sender, gameStatus);
     }
 
     function reportCheating(
         bytes32 gameId,
         GameStatus calldata gameStatus
     ) external {
-        require(
-            gameStatus.gameStatusType == GameStatusType.Shot,
-            "ZKBattleship: Invalid report"
-        );
         Game storage game = games[gameId];
         address opponentSessionKey;
         if (msg.sender == game.creator) {
@@ -731,11 +746,12 @@ contract ZKBattleshipV2 is IZKBattleshipV2 {
             }
         }
 
-        emit ShotResultReported(
+        emit ResultReported(
             gameId,
             msg.sender,
             game.fireAtPosition,
-            shotResult
+            shotResult,
+            game.currentGameStatusHash
         );
     }
 
