@@ -159,6 +159,7 @@ contract ZKBattleshipV2 is IZKBattleshipV2 {
 
         gameId = keccak256(
             abi.encodePacked(
+                address(this),
                 msg.sender,
                 randomnessCommitment,
                 boardCommitment,
@@ -214,9 +215,8 @@ contract ZKBattleshipV2 is IZKBattleshipV2 {
             "ZKBattleship: User is already in a game"
         );
         require(sessionKey != address(0), "ZKBattleship: Invalid session key");
-        require(endTime < block.timestamp);
+        require(endTime > block.timestamp, "ZKBattleship: Time expired");
         userGameIds[msg.sender] = gameId;
-
         Game storage game = games[gameId];
         require(
             game.nextTurnState == NextTurnState.Join,
