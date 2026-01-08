@@ -108,22 +108,6 @@ enum GameStatusType {
 }
 
 /**
- * @notice Represents a single status update in the game, signed by a session key.
- * @param //gameStatusType The type of status update (Shot or Report).
- * @param value If the type is Shot, this is the target position (0-63).
- *              If the type is Report, this is the ShotStatus (Miss, Hit, Sunk).
- * @param sessionKeySignature A signature from the player's session key,
- *                            verifying the authenticity of the game status update.
- *                            For a Shot, it's `attacker.sign(gameStatusHash || value)`.
- *                            For a Report, it's `defender.sign(gameStatusHash || value)`.
- */
-struct GameStatus {
-    // GameStatusType gameStatusType;
-    uint8 value;
-    bytes sessionKeySignature;
-}
-
-/**
  * @title IZKBattleshipV2
  * @notice Interface for the ZK-Battleship game contract.
  * @dev Defines the core functions, events, and data structures for a trustless battleship game
@@ -335,37 +319,48 @@ interface IZKBattleshipV2 {
     ) external;
 
     /**
-     * @notice Submits a series of game status updates for off-chain progression.
-     * @dev These statuses are signed by session keys and allow players to update the game state
-     *      without requiring a transaction for every move.
-     * @param gameId The identifier of the game.
-     * @param gameStatus An array of signed game status updates.
+     * @notice Submits a batch of opponent's moves to update the game state on-chain.
+     * @dev Allows a player to force progress by submitting a sequence of game actions that the opponent has
+     *      already signed off-chain. This is a key mechanism for resolving disputes or timeouts.
+     *      The entire sequence is validated against the opponent's single signature.
+     *      The update is only applied if `expectGameStatusHash` matches the current on-chain game status hash,
+     *      preventing updates from being applied to the wrong state.
+     * @param gameId The unique identifier for the game being updated.
+     * @param expectGameStatusHash The expected game status hash before this batch of updates is applied.
+     * @param gameStatus An array of game actions (e.g., shot positions or results) performed by the opponent.
+     * @param opponentSessionKeySignature The opponent's session key signature that validates the entire `gameStatus` sequence.
      */
     function submitGameStatus(
         bytes32 gameId,
-        GameStatus[] calldata gameStatus
+        bytes32 expectGameStatusHash,
+        uint8[] calldata gameStatus,
+        bytes calldata opponentSessionKeySignature
     ) external;
 
     /**
      * @notice Reports that an opponent has cheated.
      * @dev This function is used to challenge an invalid game state.
      * @param gameId The identifier of the game.
-     * @param gameStatus The game status being challenged as fraudulent.
+     * @param firePosition The game status being challenged as fraudulent.
+     * @param opponentSessionKeySignature The opponent's session key signature.
      */
     function reportCheating(
         bytes32 gameId,
-        GameStatus calldata gameStatus
+        uint8 firePosition,
+        bytes calldata opponentSessionKeySignature
     ) external;
 
     /**
      * @notice Reports the result of an opponent's shot using a zero-knowledge proof.
      * @dev The proof is verified on-chain to confirm the outcome without revealing the board state.
      * @param gameId The identifier of the game.
+     * @param expectGameStatusHash The expected game status hash.
      * @param shotResult The reported outcome of the shot.
      * @param proof The serialized ZK proof data that validates the reported result.
      */
     function reportShotResult(
         bytes32 gameId,
+        bytes32 expectGameStatusHash,
         ShotResult memory shotResult,
         bytes calldata proof
     ) external;

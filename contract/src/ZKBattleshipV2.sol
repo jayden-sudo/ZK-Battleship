@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0
 pragma solidity ^0.8.30;
 
-import {IZKBattleshipV2, UserBalance, Game, GameStatus, GameStatusType, NextTurnState, ShotResult, ShotStatus, DashBoard} from "./IZKBattleshipV2.sol";
+import {IZKBattleshipV2, UserBalance, Game, NextTurnState, ShotResult, ShotStatus, DashBoard} from "./IZKBattleshipV2.sol";
 import {Bytes32LinkedList} from "./Bytes32LinkedList.sol";
 import {IVerifier} from "./IVerifier.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
@@ -415,13 +415,57 @@ contract ZKBattleshipV2 is IZKBattleshipV2 {
         revert("ZKBattleship: Invalid session key signature");
     }
 
+    function checkGameEnd(
+        bytes32 gameId,
+        address creator,
+        address joiner,
+        NextTurnState nextTurnState,
+        uint8 fireAtPosition,
+        uint64 creatorGameBoard,
+        uint64 joinerGameBoard
+    ) private returns (bool) {
+        // Check for winner: HITS_TO_WIN total hits are required to win.
+        if (nextTurnState == NextTurnState.CreatorFire) {
+            creatorGameBoard =
+                creatorGameBoard |
+                (uint64(1) << uint64(BOARD_SIZE - 1 - fireAtPosition));
+            if (countSetBits(creatorGameBoard) >= HITS_TO_WIN) {
+                gameEnded(gameId, joiner);
+                return true;
+            }
+        } else {
+            joinerGameBoard =
+                joinerGameBoard |
+                (uint64(1) << uint64(BOARD_SIZE - 1 - fireAtPosition));
+            if (countSetBits(joinerGameBoard) >= HITS_TO_WIN) {
+                gameEnded(gameId, creator);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    function checkSessionKey(
+        bytes32 gameStatusHash,
+        bytes calldata sessionKeySignature,
+        address sessionKey
+    ) private pure {
+        address recovered = recover(gameStatusHash, sessionKeySignature);
+        require(recovered == sessionKey, "ZKBattleship: Invalid  signature");
+    }
+
     function submitGameStatus(
         bytes32 gameId,
-        GameStatus[] calldata gameStatus
+        bytes32 expectGameStatusHash,
+        uint8[] calldata gameStatus,
+        bytes calldata opponentSessionKeySignature
     ) external override {
         require(gameStatus.length > 0);
         Game storage game = games[gameId];
-        NextTurnState nextTurnState = game.nextTurnState;
+        require(
+            game.currentGameStatusHash == expectGameStatusHash,
+            "ZKBattleship: Invalid expectGameStatusHash"
+        );
         bool senderIsCreator;
         if (msg.sender == game.creator) {
             senderIsCreator = true;
@@ -439,9 +483,6 @@ contract ZKBattleshipV2 is IZKBattleshipV2 {
                     (If cheating occurs, the opponent may submit a cheating report via reportCheating().)
                 4.	If the last item in the gameStatus array is our Shot and the length of gameStatus is greater than 1, the submission fails.
                     (A zk proof must be submitted via reportShotResult() before submitting gameStatus.)
-            TODO:
-                Verifying only the last signature is sufficient to guarantee security 
-                (if the verification of the final signature succeeds, it implies that all preceding messages have been authenticated by the signer)
          
          */
         bytes32 prevGameStatusHash; // = game.previousGameStatusHash;
@@ -449,14 +490,24 @@ contract ZKBattleshipV2 is IZKBattleshipV2 {
         uint8 fireAtPosition = game.fireAtPosition;
         uint64 creatorGameBoard = game.creatorGameBoard;
         uint64 joinerGameBoard = game.joinerGameBoard;
-        for (uint256 i = 0; i < gameStatus.length; i++) {
-            GameStatus calldata item = gameStatus[i];
-            bool lastItem = i == (gameStatus.length - 1);
+        NextTurnState nextTurnState = game.nextTurnState;
+        if (gameStatus.length == 1) {
+            if (senderIsCreator) {
+                require(
+                    nextTurnState != NextTurnState.CreatorReport,
+                    "ZKBattleship: self report must be submitted via reportShotResult()"
+                );
+            } else {
+                require(
+                    nextTurnState != NextTurnState.JoinerReport,
+                    "ZKBattleship: self report must be submitted via reportShotResult()"
+                );
+            }
             if (
                 nextTurnState == NextTurnState.CreatorFire ||
                 nextTurnState == NextTurnState.JoinerFire
             ) {
-                fireAtPosition = item.value;
+                fireAtPosition = gameStatus[0];
                 require(fireAtPosition < 64);
                 prevGameStatusHash = gameStatusHash;
                 gameStatusHash = keccak256(
@@ -472,17 +523,10 @@ contract ZKBattleshipV2 is IZKBattleshipV2 {
                         "ZKBattleship: Position already shot"
                     );
 
-                    if (senderIsCreator) {
-                        if (lastItem) {
-                            require(
-                                gameStatus.length == 1,
-                                "ZKBattleship: Shot must be submitted alone"
-                            );
-                        }
-                    } else {
+                    if (!senderIsCreator) {
                         address recovered = recover(
                             gameStatusHash,
-                            item.sessionKeySignature
+                            opponentSessionKeySignature
                         );
                         require(
                             recovered == game.creatorSessionKey,
@@ -502,19 +546,12 @@ contract ZKBattleshipV2 is IZKBattleshipV2 {
                     if (senderIsCreator) {
                         address recovered = recover(
                             gameStatusHash,
-                            item.sessionKeySignature
+                            opponentSessionKeySignature
                         );
                         require(
                             recovered == game.joinerSessionKey,
                             "ZKBattleship: Invalid opponent signature"
                         );
-                    } else {
-                        if (lastItem) {
-                            require(
-                                gameStatus.length == 1,
-                                "ZKBattleship: Shot must be submitted alone"
-                            );
-                        }
                     }
                     nextTurnState = NextTurnState.CreatorReport;
                     attacker = game.joiner;
@@ -529,55 +566,35 @@ contract ZKBattleshipV2 is IZKBattleshipV2 {
                 nextTurnState == NextTurnState.CreatorReport ||
                 nextTurnState == NextTurnState.JoinerReport
             ) {
-                require(item.value <= uint8(ShotStatus.Sunk));
+                uint8 result = gameStatus[0];
+                require(result <= uint8(ShotStatus.Sunk));
                 prevGameStatusHash = gameStatusHash;
                 gameStatusHash = keccak256(
-                    abi.encodePacked(gameStatusHash, item.value)
+                    abi.encodePacked(gameStatusHash, result)
                 );
-                ShotStatus shotStatus = ShotStatus(item.value);
+                ShotStatus shotStatus = ShotStatus(result);
                 address defender;
                 if (nextTurnState == NextTurnState.CreatorReport) {
-                    if (senderIsCreator) {
-                        if (lastItem) {
-                            require(
-                                false,
-                                "ZKBattleship: Use reportShotResult for own report"
-                            );
-                        }
-                    } else {
-                        address recovered = recover(
+                    if (!senderIsCreator) {
+                        checkSessionKey(
                             gameStatusHash,
-                            item.sessionKeySignature
-                        );
-                        require(
-                            recovered == game.creatorSessionKey,
-                            "ZKBattleship: Invalid opponent signature"
+                            opponentSessionKeySignature,
+                            game.creatorSessionKey
                         );
                     }
                     nextTurnState = NextTurnState.CreatorFire;
                     defender = game.creator;
                 } else {
                     if (senderIsCreator) {
-                        address recovered = recover(
+                        checkSessionKey(
                             gameStatusHash,
-                            item.sessionKeySignature
+                            opponentSessionKeySignature,
+                            game.joinerSessionKey
                         );
-                        require(
-                            recovered == game.joinerSessionKey,
-                            "ZKBattleship: Invalid opponent signature"
-                        );
-                    } else {
-                        if (lastItem) {
-                            require(
-                                false,
-                                "ZKBattleship: Use reportShotResult for own report"
-                            );
-                        }
                     }
                     nextTurnState = NextTurnState.JoinerFire;
                     defender = game.joiner;
                 }
-
                 emit ResultReported(
                     gameId,
                     defender,
@@ -585,31 +602,180 @@ contract ZKBattleshipV2 is IZKBattleshipV2 {
                     ShotResult(shotStatus, 0, 0),
                     gameStatusHash
                 );
-
                 if (shotStatus != ShotStatus.Miss) {
-                    // Check for winner: HITS_TO_WIN total hits are required to win.
+                    if (
+                        checkGameEnd(
+                            gameId,
+                            game.creator,
+                            game.joiner,
+                            nextTurnState,
+                            fireAtPosition,
+                            creatorGameBoard,
+                            joinerGameBoard
+                        )
+                    ) {
+                        return;
+                    }
+                    // update gameBoard
                     if (nextTurnState == NextTurnState.CreatorFire) {
-                        creatorGameBoard =
-                            creatorGameBoard |
-                            (uint64(1) <<
-                                uint64(BOARD_SIZE - 1 - fireAtPosition));
-                        if (countSetBits(creatorGameBoard) >= HITS_TO_WIN) {
-                            gameEnded(gameId, game.joiner);
-                            return;
-                        }
+                        creatorGameBoard = updateGameBoard(
+                            creatorGameBoard,
+                            fireAtPosition
+                        );
                     } else {
-                        joinerGameBoard =
-                            joinerGameBoard |
-                            (uint64(1) <<
-                                uint64(BOARD_SIZE - 1 - fireAtPosition));
-                        if (countSetBits(joinerGameBoard) >= HITS_TO_WIN) {
-                            gameEnded(gameId, game.creator);
-                            return;
-                        }
+                        joinerGameBoard = updateGameBoard(
+                            joinerGameBoard,
+                            fireAtPosition
+                        );
                     }
                 }
             } else {
                 revert("ZKBattleship: Invalid game status");
+            }
+        } else {
+            for (uint256 i = 0; i < gameStatus.length; i++) {
+                uint8 value = gameStatus[i];
+                bool lastItem = i == (gameStatus.length - 1);
+                if (lastItem) {
+                    if (senderIsCreator) {
+                        require(
+                            nextTurnState == NextTurnState.JoinerFire ||
+                                nextTurnState == NextTurnState.JoinerReport,
+                            "ZKBattleship: status error"
+                        );
+                    } else {
+                        require(
+                            nextTurnState == NextTurnState.CreatorFire ||
+                                nextTurnState == NextTurnState.CreatorReport,
+                            "ZKBattleship: status error"
+                        );
+                    }
+                }
+                if (
+                    nextTurnState == NextTurnState.CreatorFire ||
+                    nextTurnState == NextTurnState.JoinerFire
+                ) {
+                    fireAtPosition = value;
+                    require(fireAtPosition < 64);
+                    prevGameStatusHash = gameStatusHash;
+                    gameStatusHash = keccak256(
+                        abi.encodePacked(gameStatusHash, fireAtPosition)
+                    );
+                    address attacker;
+                    if (nextTurnState == NextTurnState.CreatorFire) {
+                        require(
+                            (joinerGameBoard >>
+                                uint64(BOARD_SIZE - 1 - fireAtPosition)) &
+                                1 ==
+                                0,
+                            "ZKBattleship: Position already shot"
+                        );
+                        if (lastItem) {
+                            checkSessionKey(
+                                gameStatusHash,
+                                opponentSessionKeySignature,
+                                game.creatorSessionKey
+                            );
+                        }
+                        nextTurnState = NextTurnState.JoinerReport;
+                        attacker = game.creator;
+                    } else {
+                        require(
+                            (creatorGameBoard >>
+                                uint64(BOARD_SIZE - 1 - fireAtPosition)) &
+                                1 ==
+                                0,
+                            "ZKBattleship: Position already shot"
+                        );
+
+                        if (lastItem) {
+                            checkSessionKey(
+                                gameStatusHash,
+                                opponentSessionKeySignature,
+                                game.joinerSessionKey
+                            );
+                        }
+                        nextTurnState = NextTurnState.CreatorReport;
+                        attacker = game.joiner;
+                    }
+                    emit ShotFired(
+                        gameId,
+                        attacker,
+                        fireAtPosition,
+                        gameStatusHash
+                    );
+                } else if (
+                    nextTurnState == NextTurnState.CreatorReport ||
+                    nextTurnState == NextTurnState.JoinerReport
+                ) {
+                    require(value <= uint8(ShotStatus.Sunk));
+                    prevGameStatusHash = gameStatusHash;
+                    gameStatusHash = keccak256(
+                        abi.encodePacked(gameStatusHash, value)
+                    );
+                    ShotStatus shotStatus = ShotStatus(value);
+                    address defender;
+                    if (nextTurnState == NextTurnState.CreatorReport) {
+                        if (lastItem) {
+                            checkSessionKey(
+                                gameStatusHash,
+                                opponentSessionKeySignature,
+                                game.creatorSessionKey
+                            );
+                        }
+                        nextTurnState = NextTurnState.CreatorFire;
+                        defender = game.creator;
+                    } else {
+                        if (lastItem) {
+                            checkSessionKey(
+                                gameStatusHash,
+                                opponentSessionKeySignature,
+                                game.joinerSessionKey
+                            );
+                        }
+                        nextTurnState = NextTurnState.JoinerFire;
+                        defender = game.joiner;
+                    }
+
+                    emit ResultReported(
+                        gameId,
+                        defender,
+                        fireAtPosition,
+                        ShotResult(shotStatus, 0, 0),
+                        gameStatusHash
+                    );
+
+                    if (shotStatus != ShotStatus.Miss) {
+                        if (
+                            checkGameEnd(
+                                gameId,
+                                game.creator,
+                                game.joiner,
+                                nextTurnState,
+                                fireAtPosition,
+                                creatorGameBoard,
+                                joinerGameBoard
+                            )
+                        ) {
+                            return;
+                        }
+
+                        // update gameBoard
+                        if (nextTurnState == NextTurnState.CreatorFire) {
+                            creatorGameBoard = updateGameBoard(
+                                creatorGameBoard,
+                                fireAtPosition
+                            );
+                        } else {
+                            joinerGameBoard = updateGameBoard(
+                                joinerGameBoard,
+                                fireAtPosition
+                            );
+                        }
+                    }
+                } else {
+                    revert("ZKBattleship: Invalid game status");
+                }
             }
         }
         game.creatorGameBoard = creatorGameBoard;
@@ -623,7 +789,8 @@ contract ZKBattleshipV2 is IZKBattleshipV2 {
 
     function reportCheating(
         bytes32 gameId,
-        GameStatus calldata gameStatus
+        uint8 firePosition,
+        bytes calldata opponentSessionKeySignature
     ) external {
         Game storage game = games[gameId];
         address opponentSessionKey;
@@ -644,13 +811,13 @@ contract ZKBattleshipV2 is IZKBattleshipV2 {
         }
 
         require(
-            gameStatus.value != game.fireAtPosition,
+            firePosition != game.fireAtPosition,
             "ZKBattleship: Invalid report"
         );
         bytes32 _hash = keccak256(
-            abi.encodePacked(game.previousGameStatusHash, game.fireAtPosition)
+            abi.encodePacked(game.previousGameStatusHash, firePosition)
         );
-        address recovered = recover(_hash, gameStatus.sessionKeySignature);
+        address recovered = recover(_hash, opponentSessionKeySignature);
         require(recovered == opponentSessionKey);
 
         gameEnded(gameId, msg.sender);
@@ -673,12 +840,26 @@ contract ZKBattleshipV2 is IZKBattleshipV2 {
         return uint8(y >> 56);
     }
 
+    function updateGameBoard(
+        uint64 gameBoard,
+        uint8 fireAtPosition
+    ) private pure returns (uint64 newGameBoard) {
+        newGameBoard =
+            gameBoard |
+            (uint64(1) << uint64(BOARD_SIZE - 1 - fireAtPosition));
+    }
+
     function reportShotResult(
         bytes32 gameId,
+        bytes32 expectGameStatusHash,
         ShotResult memory shotResult,
         bytes calldata proof
     ) external override {
         Game storage game = games[gameId];
+        require(
+            game.currentGameStatusHash == expectGameStatusHash,
+            "ZKBattleship: Invalid expectGameStatusHash"
+        );
         bytes32 boardCommitment;
         uint64 gameBoard;
         if (game.nextTurnState == NextTurnState.CreatorReport) {
@@ -715,13 +896,11 @@ contract ZKBattleshipV2 is IZKBattleshipV2 {
         );
 
         // If the shot was a hit or sunk a ship, update the game board
-        if (
-            shotResult.shotStatus == ShotStatus.Hit ||
-            shotResult.shotStatus == ShotStatus.Sunk
-        ) {
-            uint64 newGameBoard = gameBoard |
-                (uint64(1) << uint64(BOARD_SIZE - 1 - game.fireAtPosition));
-
+        if (shotResult.shotStatus != ShotStatus.Miss) {
+            uint64 newGameBoard = updateGameBoard(
+                gameBoard,
+                game.fireAtPosition
+            );
             // Check for winner: HITS_TO_WIN total hits are required to win.
             if (countSetBits(newGameBoard) >= HITS_TO_WIN) {
                 address winner;
@@ -804,6 +983,10 @@ contract ZKBattleshipV2 is IZKBattleshipV2 {
         bytes32[] memory publicInputs = new bytes32[](2);
         publicInputs[0] = boardCommitment;
         publicInputs[1] = packPublicInputs(gameBoard, firePosition, shotResult);
-        return VERIFIER.verify(proof, publicInputs);
+        try VERIFIER.verify(proof, publicInputs) returns (bool verified) {
+            return verified;
+        } catch {
+            return false;
+        }
     }
 }
