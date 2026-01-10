@@ -248,9 +248,17 @@ interface IZKBattleshipV2 {
 
     /**
      * @notice Deposits ETH into the contract, crediting the caller's balance.
-     * @dev The amount is determined by `msg.value`.
+     * @dev The amount is determined by `msg.value`. The deposited funds can be used for game stakes.
+     * @dev Reverts if msg.value is 0.
      */
     function deposit() external payable;
+
+    /**
+     * @notice Withdraws ETH from the caller's available (unlocked) balance.
+     * @param amount The amount of ETH (in wei) to withdraw.
+     * @dev Reverts if the amount exceeds the available balance or if the transfer fails.
+     */
+    function withdraw(uint256 amount) external;
 
     /**
      * @notice Creates a new game and puts it in a waiting state.
@@ -276,8 +284,8 @@ interface IZKBattleshipV2 {
      * @param gameId The identifier of the game to join.
      * @param boardCommitment A commitment to the joiner's board layout.
      * @param sessionKey A session key for signing off-chain game status updates.
-     * @param endTime end time
-     * @param creatorSignature The signature from the creator's session key(Via P2P,).
+     * @param endTime The timestamp when the creator's signature expires (for security).
+     * @param creatorSignature The signature from the creator's session key (obtained via P2P communication).
      */
     function joinGame(
         bytes32 gameId,
@@ -310,6 +318,7 @@ interface IZKBattleshipV2 {
 
     /**
      * @notice Allows a player to surrender the game.
+     * @dev The opponent is declared the winner and receives the staked funds.
      * @param gameId The identifier of the game.
      * @param sessionKeySignature A signature from the player's session key to confirm the surrender.
      */
@@ -341,8 +350,8 @@ interface IZKBattleshipV2 {
      * @notice Reports that an opponent has cheated.
      * @dev This function is used to challenge an invalid game state.
      * @param gameId The identifier of the game.
-     * @param firePosition The game status being challenged as fraudulent.
-     * @param opponentSessionKeySignature The opponent's session key signature.
+     * @param firePosition The board position (0-63) where cheating is being reported.
+     * @param opponentSessionKeySignature The opponent's session key signature that is being challenged.
      */
     function reportCheating(
         bytes32 gameId,

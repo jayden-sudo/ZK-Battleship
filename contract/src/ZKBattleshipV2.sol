@@ -131,6 +131,17 @@ contract ZKBattleshipV2 is IZKBattleshipV2 {
         balances[user].totalBalance += amount;
     }
 
+    function withdraw(uint256 amount) external {
+        UserBalance storage userBalance = balances[msg.sender];
+        require(
+            userBalance.totalBalance - userBalance.lockedBalance >= amount,
+            "ZKBattleship: Insufficient unlocked balance"
+        );
+        userBalance.totalBalance -= amount;
+        (bool success, ) = msg.sender.call{value: amount}("");
+        require(success, "ZKBattleship: ETH transfer failed");
+    }
+
     function createGame(
         bytes32 randomnessCommitment,
         bytes32 boardCommitment,
